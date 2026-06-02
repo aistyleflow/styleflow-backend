@@ -1,6 +1,7 @@
 const express = require("express");
 const app = express();
 
+app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // Home route
@@ -27,9 +28,23 @@ app.get("/whatsapp", (req, res) => {
 
 // WhatsApp incoming messages (POST - receives actual messages)
 app.post("/whatsapp", (req, res) => {
-  console.log("📩 New message received!");
-  console.log(JSON.stringify(req.body, null, 2)); // ✅ cleaner, readable format
-  res.status(200).send("MESSAGE_RECEIVED");
+  const body = req.body;
+
+  // Guard: ignore empty requests
+  if (!body) {
+    console.log("⚠️ Empty request received");
+    return res.sendStatus(400);
+  }
+
+  console.log("📩 WhatsApp message received");
+  console.log(JSON.stringify(body, null, 2)); // ✅ readable format in terminal
+  res.sendStatus(200);
+});
+
+// 404 handler - unknown routes
+app.use((req, res) => {
+  console.log(`⚠️ Unknown route accessed: ${req.method} ${req.url}`);
+  res.status(404).send("Route not found");
 });
 
 // Error handling
