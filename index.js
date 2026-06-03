@@ -1,5 +1,5 @@
 const express = require("express");
-const twilio = require("twilio"); // ✅ Step 1
+const twilio = require("twilio");
 
 const app = express();
 
@@ -7,7 +7,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
 // Twilio client
-const client = twilio( // ✅ Step 2
+const client = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
@@ -34,7 +34,7 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
-// WhatsApp incoming messages (POST - receives and replies) ✅ Step 3
+// WhatsApp incoming messages (POST - receives and replies)
 app.post("/whatsapp", async (req, res) => {
   try {
     const body = req.body;
@@ -42,11 +42,11 @@ app.post("/whatsapp", async (req, res) => {
     // Guard: ignore empty requests
     if (!body) {
       console.log("⚠️ Empty request received");
-      return res.sendStatus(400);
+      return res.status(400).end(); // ✅ fixed
     }
 
     const sender = body.From;
-    const message = body.Body; // ✅ also capture what user sent
+    const message = body.Body;
 
     console.log("📩 WhatsApp message received");
     console.log(`👤 From: ${sender}`);
@@ -56,7 +56,7 @@ app.post("/whatsapp", async (req, res) => {
     // Guard: ignore if no sender
     if (!sender) {
       console.log("⚠️ No sender found in request");
-      return res.sendStatus(400);
+      return res.status(400).end(); // ✅ fixed
     }
 
     await client.messages.create({
@@ -66,15 +66,15 @@ app.post("/whatsapp", async (req, res) => {
     });
 
     console.log(`✅ Reply sent to ${sender}`);
-    res.sendStatus(200);
+    res.status(200).end(); // ✅ fixed - no more "OK" text
 
   } catch (error) {
     console.error("❌ Error handling message:", error.message);
-    res.sendStatus(500);
+    res.status(500).end(); // ✅ fixed
   }
 });
 
-// 404 handler - unknown routes
+// 404 handler
 app.use((req, res) => {
   console.log(`⚠️ Unknown route accessed: ${req.method} ${req.url}`);
   res.status(404).send("Route not found");
