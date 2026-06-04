@@ -52,7 +52,7 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     const sender = body.From;
-    const incomingMsg = body.Body ? body.Body.trim() : ""; // ✅ trimmed for clean search
+    const incomingMsg = body.Body ? body.Body.trim() : "";
 
     console.log("📩 WhatsApp message received");
     console.log(`👤 From: ${sender}`);
@@ -63,7 +63,7 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(400).end();
     }
 
-    // ✅ Step 2 — Search products in Supabase
+    // Search products in Supabase
     const { data, error } = await supabase
       .from("products")
       .select("*")
@@ -72,22 +72,25 @@ app.post("/whatsapp", async (req, res) => {
     console.log("📊 Search results:", JSON.stringify(data, null, 2));
     console.log("❗ Search error:", error);
 
-    const twiml = new twilio.twiml.MessagingResponse(); // ✅ TwiML response
+    const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ Step 3 — Reply with product or not found message
+    // ✅ Step 2 — Show all matching products
     if (data && data.length > 0) {
-      const product = data[0];
+      console.log(`✅ ${data.length} product(s) found for: ${incomingMsg}`);
 
-      console.log(`✅ Product found: ${product.product_name}`);
+      let response = `🛍️ *StyleFlow* — Products matching "${incomingMsg}":\n\n`;
 
-      twiml.message(
-        `🛍️ Product Found!\n\n` +
-        `Product: ${product.product_name}\n` +
-        `Price: ₹${product.price}\n` +
-        `Stock: ${product.stock}\n` +
-        `Size: ${product.size}\n` +
-        `Color: ${product.color}`
-      );
+      data.forEach((product, index) => {
+        response += `${index + 1}. *${product.product_name}*\n`;
+        response += `   💰 ₹${product.price}\n`;
+        response += `   📦 Stock: ${product.stock}\n`;
+        response += `   📐 Size: ${product.size}\n`;
+        response += `   🎨 Color: ${product.color}\n\n`;
+      });
+
+      response += `_Reply with a product name to know more!_`;
+
+      twiml.message(response);
 
     } else {
       console.log("⚠️ No product found for:", incomingMsg);
