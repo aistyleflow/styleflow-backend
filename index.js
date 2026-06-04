@@ -52,26 +52,52 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     const sender = body.From;
-    const message = body.Body;
+    const incomingMsg = body.Body ? body.Body.trim() : ""; // ✅ trimmed for clean search
 
     console.log("📩 WhatsApp message received");
     console.log(`👤 From: ${sender}`);
-    console.log(`💬 Message: ${message}`);
-    console.log(JSON.stringify(body, null, 2));
+    console.log(`💬 Message: ${incomingMsg}`);
 
     if (!sender) {
       console.log("⚠️ No sender found in request");
       return res.status(400).end();
     }
 
-    await client.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: sender,
-      body: "Welcome to StyleFlow! 🛍️"
-    });
+    // ✅ Step 2 — Search products in Supabase
+    const { data, error } = await supabase
+      .from("products")
+      .select("*")
+      .ilike("product_name", `%${incomingMsg}%`);
 
-    console.log(`✅ Reply sent to ${sender}`);
-    res.status(200).end();
+    console.log("📊 Search results:", JSON.stringify(data, null, 2));
+    console.log("❗ Search error:", error);
+
+    const twiml = new twilio.twiml.MessagingResponse(); // ✅ TwiML response
+
+    // ✅ Step 3 — Reply with product or not found message
+    if (data && data.length > 0) {
+      const product = data[0];
+
+      console.log(`✅ Product found: ${product.product_name}`);
+
+      twiml.message(
+        `🛍️ Product Found!\n\n` +
+        `Product: ${product.product_name}\n` +
+        `Price: ₹${product.price}\n` +
+        `Stock: ${product.stock}\n` +
+        `Size: ${product.size}\n` +
+        `Color: ${product.color}`
+      );
+
+    } else {
+      console.log("⚠️ No product found for:", incomingMsg);
+      twiml.message(
+        `Sorry, we couldn't find any product matching "${incomingMsg}". 😔\n\nTry searching with a different keyword!`
+      );
+    }
+
+    res.writeHead(200, { "Content-Type": "text/xml" });
+    res.end(twiml.toString());
 
   } catch (error) {
     console.error("❌ Error handling message:", error.message);
@@ -79,7 +105,7 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// 4. Products route - fetch from Supabase
+// 4. Products route - fetch all from Supabase
 app.get("/products", async (req, res) => {
   try {
     console.log("📦 Fetching products from Supabase...");
@@ -88,21 +114,20 @@ app.get("/products", async (req, res) => {
       .from("products")
       .select("*");
 
-    // ✅ Debug logs added
     console.log("📊 DATA:", JSON.stringify(data, null, 2));
     console.log("❗ ERROR:", error);
 
     if (error) {
       console.error("❌ Supabase error:", error.message);
-      return res.status(500).json({ 
+      return res.status(500).json({
         error: error.message,
-        hint: "Check your Supabase table name and environment variables" 
+        hint: "Check your Supabase table name and environment variables"
       });
     }
 
     if (!data || data.length === 0) {
       console.log("⚠️ No products found in table");
-      return res.status(200).json({ 
+      return res.status(200).json({
         message: "No products found",
         hint: "Check if your Supabase table is named exactly 'products' and has data in it"
       });
