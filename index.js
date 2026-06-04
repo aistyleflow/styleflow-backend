@@ -19,8 +19,6 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
-// ✅ ROUTE ORDER MATTERS - specific routes first, 404 last
-
 // 1. Home route
 app.get("/", (req, res) => {
   res.send("StyleFlow is running!");
@@ -90,17 +88,27 @@ app.get("/products", async (req, res) => {
       .from("products")
       .select("*");
 
+    // ✅ Debug logs added
+    console.log("📊 DATA:", JSON.stringify(data, null, 2));
+    console.log("❗ ERROR:", error);
+
     if (error) {
       console.error("❌ Supabase error:", error.message);
-      return res.status(500).json({ error: error.message });
+      return res.status(500).json({ 
+        error: error.message,
+        hint: "Check your Supabase table name and environment variables" 
+      });
     }
 
     if (!data || data.length === 0) {
-      console.log("⚠️ No products found");
-      return res.status(404).json({ message: "No products found" });
+      console.log("⚠️ No products found in table");
+      return res.status(200).json({ 
+        message: "No products found",
+        hint: "Check if your Supabase table is named exactly 'products' and has data in it"
+      });
     }
 
-    console.log(`✅ ${data.length} products fetched`);
+    console.log(`✅ ${data.length} products fetched successfully`);
     res.status(200).json(data);
 
   } catch (error) {
@@ -109,13 +117,13 @@ app.get("/products", async (req, res) => {
   }
 });
 
-// 5. 404 handler - ALWAYS LAST ✅
+// 5. 404 handler - ALWAYS LAST
 app.use((req, res) => {
   console.log(`⚠️ Unknown route accessed: ${req.method} ${req.url}`);
   res.status(404).send("Route not found");
 });
 
-// 6. Error handling - ALWAYS LAST ✅
+// 6. Error handling - ALWAYS LAST
 app.use((err, req, res, next) => {
   console.error("❌ Error:", err.stack);
   res.status(500).send("Something went wrong!");
