@@ -51,34 +51,95 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(400).end();
     }
 
-    const sender = body.From;
-    const incomingMsg = body.Body ? body.Body.trim() : "";
+    // ✅ Step 2 — Detect number input
+    const msg = body.Body ? body.Body.trim() : "";
+    const phone = body.From; // ✅ Step 1 — phone for session
 
     console.log("📩 WhatsApp message received");
-    console.log(`👤 From: ${sender}`);
-    console.log(`💬 Message: ${incomingMsg}`);
+    console.log(`👤 From: ${phone}`);
+    console.log(`💬 Message: ${msg}`);
 
-    if (!sender) {
+    if (!phone) {
       console.log("⚠️ No sender found in request");
       return res.status(400).end();
     }
 
-    // Search products in Supabase
+    const twiml = new twilio.twiml.MessagingResponse();
+    const isNumber = !isNaN(msg) && msg !== ""; // ✅ Step 2 — check if number
+
+    // ✅ Step 3 — NUMBER CHECK FIRST (VERY IMPORTANT)
+    if (isNumber) {
+      console.log(`🔢 User sent number: ${msg}`);
+      const index = parseInt(msg) - 1;
+
+      // Fetch saved session from Supabase
+      const { data: session, error: sessionError } = await supabase
+        .from("user_sessions")
+        .select("*")
+        .eq("phone_number", phone)
+        .single();
+
+      console.log("📋 Session data:", JSON.stringify(session, null, 2));
+      console.log("❗ Session error:", sessionError);
+
+      // Guard: no session or invalid index
+      if (!session || !session.last_results || !session.last_results[index]) {
+        console.log("⚠️ Invalid selection or no session found");
+        twiml.message(
+          `⚠️ Invalid selection.\n\nPlease search for a product first!\nExample: type *Black* or *Jeans*`
+        );
+        res.writeHead(200, { "Content-Type": "text/xml" });
+        return res.end(twiml.toString());
+      }
+
+      const product = session.last_results[index];
+      console.log(`✅ Product selected: ${product.product_name}`);
+
+      twiml.message(
+        `🛍️ *Product Details*\n\n` +
+        `📦 Product: ${product.product_name}\n` +
+        `💰 Price: ₹${product.price}\n` +
+        `📦 Stock: ${product.stock}\n` +
+        `📐 Size: ${product.size}\n` +
+        `🎨 Color: ${product.color}\n\n` +
+        `_Reply with another keyword to search more!_`
+      );
+
+      res.writeHead(200, { "Content-Type": "text/xml" });
+      return res.end(twiml.toString());
+    }
+
+    // ✅ Step 4 — SEARCH LOGIC SECOND
+    console.log(`🔍 Searching products for: ${msg}`);
+
     const { data, error } = await supabase
       .from("products")
       .select("*")
-      .ilike("product_name", `%${incomingMsg}%`);
+      .or(
+        `product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`
+      ); // ✅ searches name, category and color at once
 
     console.log("📊 Search results:", JSON.stringify(data, null, 2));
     console.log("❗ Search error:", error);
 
-    const twiml = new twilio.twiml.MessagingResponse();
-
-    // ✅ Step 2 — Show all matching products
+    // ✅ Step 1 — Save session after search
     if (data && data.length > 0) {
-      console.log(`✅ ${data.length} product(s) found for: ${incomingMsg}`);
+      const { error: upsertError } = await supabase
+        .from("user_sessions")
+        .upsert({
+          phone_number: phone,
+          last_results: data
+        });
 
-      let response = `🛍️ *StyleFlow* — Products matching "${incomingMsg}":\n\n`;
+      if (upsertError) {
+        console.error("❌ Session save error:", upsertError.message);
+      } else {
+        console.log(`✅ Session saved for ${phone}`);
+      }
+
+      console.log(`✅ ${data.length} product(s) found for: ${msg}`);
+
+      let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
       data.forEach((product, index) => {
         response += `${index + 1}. *${product.product_name}*\n`;
@@ -88,14 +149,14 @@ app.post("/whatsapp", async (req, res) => {
         response += `   🎨 Color: ${product.color}\n\n`;
       });
 
-      response += `_Reply with a product name to know more!_`;
+      response += `_Reply with a number (1, 2, 3...) to see full details!_`;
 
       twiml.message(response);
 
     } else {
-      console.log("⚠️ No product found for:", incomingMsg);
+      console.log("⚠️ No product found for:", msg);
       twiml.message(
-        `Sorry, we couldn't find any product matching "${incomingMsg}". 😔\n\nTry searching with a different keyword!`
+        `Sorry, we couldn't find any product matching "${msg}". 😔\n\nTry searching with a different keyword!\nExample: *Black*, *Jeans*, *XL*`
       );
     }
 
