@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@supabase/supabase-js": "^2.107.0",
     "express": "^5.2.1",
     "twilio": "^6.0.2"
   }
