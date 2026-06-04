@@ -1,6 +1,6 @@
 const express = require("express");
 const twilio = require("twilio");
-const { createClient } = require("@supabase/supabase-js"); // ✅ Step 1
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 
@@ -13,18 +13,20 @@ const client = twilio(
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// Supabase client ✅ Step 2
+// Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
 
-// Home route
+// ✅ ROUTE ORDER MATTERS - specific routes first, 404 last
+
+// 1. Home route
 app.get("/", (req, res) => {
   res.send("StyleFlow is running!");
 });
 
-// WhatsApp webhook verification (GET - Meta verifies your server)
+// 2. WhatsApp webhook verification (GET)
 app.get("/whatsapp", (req, res) => {
   console.log("Someone accessed WhatsApp endpoint");
 
@@ -41,12 +43,11 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
-// WhatsApp incoming messages (POST - receives and replies)
+// 3. WhatsApp incoming messages (POST)
 app.post("/whatsapp", async (req, res) => {
   try {
     const body = req.body;
 
-    // Guard: ignore empty requests
     if (!body) {
       console.log("⚠️ Empty request received");
       return res.status(400).end();
@@ -60,7 +61,6 @@ app.post("/whatsapp", async (req, res) => {
     console.log(`💬 Message: ${message}`);
     console.log(JSON.stringify(body, null, 2));
 
-    // Guard: ignore if no sender
     if (!sender) {
       console.log("⚠️ No sender found in request");
       return res.status(400).end();
@@ -81,7 +81,7 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// Products route - fetch from Supabase ✅ Step 3
+// 4. Products route - fetch from Supabase
 app.get("/products", async (req, res) => {
   try {
     console.log("📦 Fetching products from Supabase...");
@@ -95,7 +95,6 @@ app.get("/products", async (req, res) => {
       return res.status(500).json({ error: error.message });
     }
 
-    // Guard: no products found
     if (!data || data.length === 0) {
       console.log("⚠️ No products found");
       return res.status(404).json({ message: "No products found" });
@@ -110,13 +109,13 @@ app.get("/products", async (req, res) => {
   }
 });
 
-// 404 handler
+// 5. 404 handler - ALWAYS LAST ✅
 app.use((req, res) => {
   console.log(`⚠️ Unknown route accessed: ${req.method} ${req.url}`);
   res.status(404).send("Route not found");
 });
 
-// Error handling
+// 6. Error handling - ALWAYS LAST ✅
 app.use((err, req, res, next) => {
   console.error("❌ Error:", err.stack);
   res.status(500).send("Something went wrong!");
