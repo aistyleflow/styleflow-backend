@@ -51,9 +51,12 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(400).end();
     }
 
-    // ✅ Step 2 — Detect number input
+    // ✅ Step 1 — Fix phone format (strip whatsapp: prefix)
+    const phone = body.From
+      ? body.From.replace("whatsapp:", "").trim()
+      : null;
+
     const msg = body.Body ? body.Body.trim() : "";
-    const phone = body.From; // ✅ Step 1 — phone for session
 
     console.log("📩 WhatsApp message received");
     console.log(`👤 From: ${phone}`);
@@ -65,9 +68,11 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
-    const isNumber = !isNaN(msg) && msg !== ""; // ✅ Step 2 — check if number
 
-    // ✅ Step 3 — NUMBER CHECK FIRST (VERY IMPORTANT)
+    // ✅ Step 4 — Use regex for reliable number detection
+    const isNumber = /^[0-9]+$/.test(msg);
+
+    // ✅ Step 5 — NUMBER CHECK FIRST (VERY IMPORTANT)
     if (isNumber) {
       console.log(`🔢 User sent number: ${msg}`);
       const index = parseInt(msg) - 1;
@@ -82,17 +87,28 @@ app.post("/whatsapp", async (req, res) => {
       console.log("📋 Session data:", JSON.stringify(session, null, 2));
       console.log("❗ Session error:", sessionError);
 
-      // Guard: no session or invalid index
-      if (!session || !session.last_results || !session.last_results[index]) {
-        console.log("⚠️ Invalid selection or no session found");
+      // Guard: no session found
+      if (!session || !session.last_results) {
+        console.log("⚠️ No session found for:", phone);
         twiml.message(
-          `⚠️ Invalid selection.\n\nPlease search for a product first!\nExample: type *Black* or *Jeans*`
+          `⚠️ Session expired. Please search again!\n\nExample: type *Black* or *Jeans*`
         );
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
       }
 
       const product = session.last_results[index];
+
+      // Guard: invalid index
+      if (!product) {
+        console.log(`⚠️ Invalid index ${index} for session results`);
+        twiml.message(
+          `⚠️ Invalid selection. Please choose a correct number.\n\nExample: if list shows 3 products, reply *1*, *2* or *3*`
+        );
+        res.writeHead(200, { "Content-Type": "text/xml" });
+        return res.end(twiml.toString());
+      }
+
       console.log(`✅ Product selected: ${product.product_name}`);
 
       twiml.message(
@@ -102,14 +118,14 @@ app.post("/whatsapp", async (req, res) => {
         `📦 Stock: ${product.stock}\n` +
         `📐 Size: ${product.size}\n` +
         `🎨 Color: ${product.color}\n\n` +
-        `_Reply with another keyword to search more!_`
+        `_Search another keyword to find more products!_`
       );
 
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml.toString());
     }
 
-    // ✅ Step 4 — SEARCH LOGIC SECOND
+    // ✅ Step 5 — SEARCH LOGIC SECOND
     console.log(`🔍 Searching products for: ${msg}`);
 
     const { data, error } = await supabase
@@ -117,27 +133,26 @@ app.post("/whatsapp", async (req, res) => {
       .select("*")
       .or(
         `product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`
-      ); // ✅ searches name, category and color at once
+      );
 
     console.log("📊 Search results:", JSON.stringify(data, null, 2));
     console.log("❗ Search error:", error);
 
-    // ✅ Step 1 — Save session after search
     if (data && data.length > 0) {
+
+      // ✅ Step 2 — Save session correctly with onConflict
       const { error: upsertError } = await supabase
         .from("user_sessions")
         .upsert({
           phone_number: phone,
           last_results: data
-        });
+        }, { onConflict: "phone_number" });
 
       if (upsertError) {
         console.error("❌ Session save error:", upsertError.message);
       } else {
-        console.log(`✅ Session saved for ${phone}`);
+        console.log(`✅ Session saved for ${phone} with ${data.length} results`);
       }
-
-      console.log(`✅ ${data.length} product(s) found for: ${msg}`);
 
       let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
