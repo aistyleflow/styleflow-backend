@@ -51,15 +51,16 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(400).end();
     }
 
-    // ✅ Step 1 — Fix phone format (strip whatsapp: prefix)
+    // ✅ Step 1 — ONE standard phone format everywhere
     const phone = body.From
       ? body.From.replace("whatsapp:", "").trim()
       : null;
 
     const msg = body.Body ? body.Body.trim() : "";
 
+    // ✅ Step 5 — Debug log to verify format in Render logs
     console.log("📩 WhatsApp message received");
-    console.log(`👤 From: ${phone}`);
+    console.log("PHONE:", phone);        // ✅ must show +919876543210
     console.log(`💬 Message: ${msg}`);
 
     if (!phone) {
@@ -69,22 +70,24 @@ app.post("/whatsapp", async (req, res) => {
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ Step 4 — Use regex for reliable number detection
+    // Number detection using regex
     const isNumber = /^[0-9]+$/.test(msg);
 
-    // ✅ Step 5 — NUMBER CHECK FIRST (VERY IMPORTANT)
+    // ✅ NUMBER CHECK FIRST
     if (isNumber) {
       console.log(`🔢 User sent number: ${msg}`);
       const index = parseInt(msg) - 1;
 
-      // Fetch saved session from Supabase
+      // ✅ Step 4 — Fetch session using SAME phone format
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
         .select("*")
-        .eq("phone_number", phone)
+        .eq("phone_number", phone)  // ✅ exact same format as stored
         .single();
 
-      console.log("📋 Session data:", JSON.stringify(session, null, 2));
+      // ✅ Debug logs to verify session lookup
+      console.log("📋 Looking up session for PHONE:", phone);
+      console.log("📋 Session found:", JSON.stringify(session, null, 2));
       console.log("❗ Session error:", sessionError);
 
       // Guard: no session found
@@ -101,9 +104,9 @@ app.post("/whatsapp", async (req, res) => {
 
       // Guard: invalid index
       if (!product) {
-        console.log(`⚠️ Invalid index ${index} for session results`);
+        console.log(`⚠️ Invalid index ${index} — only ${session.last_results.length} results`);
         twiml.message(
-          `⚠️ Invalid selection. Please choose a correct number.\n\nExample: if list shows 3 products, reply *1*, *2* or *3*`
+          `⚠️ Invalid selection.\n\nPlease choose a number between 1 and ${session.last_results.length}`
         );
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
@@ -125,7 +128,7 @@ app.post("/whatsapp", async (req, res) => {
       return res.end(twiml.toString());
     }
 
-    // ✅ Step 5 — SEARCH LOGIC SECOND
+    // ✅ SEARCH LOGIC SECOND
     console.log(`🔍 Searching products for: ${msg}`);
 
     const { data, error } = await supabase
@@ -140,18 +143,18 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ Step 2 — Save session correctly with onConflict
+      // ✅ Step 3 — Save session with correct phone format
       const { error: upsertError } = await supabase
         .from("user_sessions")
         .upsert({
-          phone_number: phone,
+          phone_number: phone,  // ✅ always +919876543210 format
           last_results: data
         }, { onConflict: "phone_number" });
 
       if (upsertError) {
         console.error("❌ Session save error:", upsertError.message);
       } else {
-        console.log(`✅ Session saved for ${phone} with ${data.length} results`);
+        console.log(`✅ Session saved for PHONE: ${phone} with ${data.length} results`);
       }
 
       let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
