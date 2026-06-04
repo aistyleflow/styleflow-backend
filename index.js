@@ -51,44 +51,53 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(400).end();
     }
 
-    // ✅ Step 1 — ONE standard phone format everywhere
-    const phone = body.From
-      ? body.From.replace("whatsapp:", "").trim()
-      : null;
-
+    // ✅ Use raw Twilio value — NO modification at all
+    const phone = body.From;
     const msg = body.Body ? body.Body.trim() : "";
 
-    // ✅ Step 5 — Debug log to verify format in Render logs
-    console.log("📩 WhatsApp message received");
-    console.log("PHONE:", phone);        // ✅ must show +919876543210
-    console.log(`💬 Message: ${msg}`);
+    // ✅ Debug — verify exact phone format in Render logs
+    console.log("=================================");
+    console.log("📩 New message received");
+    console.log("PHONE RAW VALUE:", phone);
+    console.log("MESSAGE:", msg);
+    console.log("=================================");
 
-    if (!phone) {
-      console.log("⚠️ No sender found in request");
+    if (!phone || !msg) {
+      console.log("⚠️ Missing phone or message");
       return res.status(400).end();
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // Number detection using regex
+    // ✅ NUMBER CHECK FIRST
     const isNumber = /^[0-9]+$/.test(msg);
 
-    // ✅ NUMBER CHECK FIRST
     if (isNumber) {
-      console.log(`🔢 User sent number: ${msg}`);
+      console.log(`🔢 Number received: ${msg}`);
       const index = parseInt(msg) - 1;
 
-      // ✅ Step 4 — Fetch session using SAME phone format
+      // ✅ Read session using maybeSingle to avoid crash
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
         .select("*")
-        .eq("phone_number", phone)  // ✅ exact same format as stored
-        .single();
+        .eq("phone_number", phone)
+        .limit(1)
+        .maybeSingle();
 
-      // ✅ Debug logs to verify session lookup
-      console.log("📋 Looking up session for PHONE:", phone);
+      // ✅ Full debug for session lookup
+      console.log("🔍 Looking up session for:", phone);
       console.log("📋 Session found:", JSON.stringify(session, null, 2));
-      console.log("❗ Session error:", sessionError);
+      console.log("❗ Session error:", sessionError ? sessionError.message : "none");
+
+      // Guard: session error from Supabase
+      if (sessionError) {
+        console.error("❌ Supabase session error:", sessionError.message);
+        twiml.message(
+          `⚠️ Something went wrong. Please search again!\n\nExample: type *Black* or *Jeans*`
+        );
+        res.writeHead(200, { "Content-Type": "text/xml" });
+        return res.end(twiml.toString());
+      }
 
       // Guard: no session found
       if (!session || !session.last_results) {
@@ -104,9 +113,10 @@ app.post("/whatsapp", async (req, res) => {
 
       // Guard: invalid index
       if (!product) {
-        console.log(`⚠️ Invalid index ${index} — only ${session.last_results.length} results`);
+        const max = session.last_results.length;
+        console.log(`⚠️ Invalid index ${index} — only ${max} results available`);
         twiml.message(
-          `⚠️ Invalid selection.\n\nPlease choose a number between 1 and ${session.last_results.length}`
+          `⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`
         );
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
@@ -129,7 +139,7 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     // ✅ SEARCH LOGIC SECOND
-    console.log(`🔍 Searching products for: ${msg}`);
+    console.log(`🔍 Searching products for: "${msg}"`);
 
     const { data, error } = await supabase
       .from("products")
@@ -138,24 +148,33 @@ app.post("/whatsapp", async (req, res) => {
         `product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`
       );
 
-    console.log("📊 Search results:", JSON.stringify(data, null, 2));
-    console.log("❗ Search error:", error);
+    console.log("📊 Products found:", data ? data.length : 0);
+    console.log("❗ Search error:", error ? error.message : "none");
 
     if (data && data.length > 0) {
 
-      // ✅ Step 3 — Save session with correct phone format
+      // ✅ Save session with raw phone — no onConflict to avoid mismatch
       const { error: upsertError } = await supabase
         .from("user_sessions")
         .upsert({
-          phone_number: phone,  // ✅ always +919876543210 format
+          phone_number: phone,
           last_results: data
-        }, { onConflict: "phone_number" });
+        });
 
       if (upsertError) {
         console.error("❌ Session save error:", upsertError.message);
       } else {
-        console.log(`✅ Session saved for PHONE: ${phone} with ${data.length} results`);
+        console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
       }
+
+      // ✅ Verify session was actually saved
+      const { data: verify } = await supabase
+        .from("user_sessions")
+        .select("phone_number")
+        .eq("phone_number", phone)
+        .maybeSingle();
+
+      console.log("🔎 Session verification:", verify ? "SAVED ✅" : "NOT SAVED ❌");
 
       let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
@@ -168,13 +187,14 @@ app.post("/whatsapp", async (req, res) => {
       });
 
       response += `_Reply with a number (1, 2, 3...) to see full details!_`;
-
       twiml.message(response);
 
     } else {
       console.log("⚠️ No product found for:", msg);
       twiml.message(
-        `Sorry, we couldn't find any product matching "${msg}". 😔\n\nTry searching with a different keyword!\nExample: *Black*, *Jeans*, *XL*`
+        `Sorry, we couldn't find any product matching "${msg}". 😔\n\n` +
+        `Try searching with a different keyword!\n` +
+        `Example: *Black*, *Jeans*, *XL*`
       );
     }
 
@@ -196,9 +216,6 @@ app.get("/products", async (req, res) => {
       .from("products")
       .select("*");
 
-    console.log("📊 DATA:", JSON.stringify(data, null, 2));
-    console.log("❗ ERROR:", error);
-
     if (error) {
       console.error("❌ Supabase error:", error.message);
       return res.status(500).json({
@@ -208,14 +225,13 @@ app.get("/products", async (req, res) => {
     }
 
     if (!data || data.length === 0) {
-      console.log("⚠️ No products found in table");
       return res.status(200).json({
         message: "No products found",
-        hint: "Check if your Supabase table is named exactly 'products' and has data in it"
+        hint: "Check if table is named exactly 'products' and has data"
       });
     }
 
-    console.log(`✅ ${data.length} products fetched successfully`);
+    console.log(`✅ ${data.length} products fetched`);
     res.status(200).json(data);
 
   } catch (error) {
@@ -226,7 +242,7 @@ app.get("/products", async (req, res) => {
 
 // 5. 404 handler - ALWAYS LAST
 app.use((req, res) => {
-  console.log(`⚠️ Unknown route accessed: ${req.method} ${req.url}`);
+  console.log(`⚠️ Unknown route: ${req.method} ${req.url}`);
   res.status(404).send("Route not found");
 });
 
