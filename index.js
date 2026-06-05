@@ -41,8 +41,13 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
-// ✅ Reusable function — sends product details + image in both paths
+// ✅ Reusable function — sends product details + image
 function sendProductMessage(twiml, product) {
+
+  // ✅ Show ALL fields to confirm image_url is present
+  console.log("FULL PRODUCT OBJECT:", JSON.stringify(product, null, 2));
+  console.log("Selected image:", product.image_url || "NONE — no image_url found");
+
   const message = twiml.message();
 
   message.body(
@@ -55,18 +60,13 @@ function sendProductMessage(twiml, product) {
     `_Search another keyword to find more products!_`
   );
 
-  // ✅ Debug logs added exactly as requested
-  console.log("=================================");
-  console.log("Selected image:", product.image_url || "NONE — no image_url found");
-  
   if (product.image_url) {
-    console.log("About to send media:", product.image_url); // ✅ exact debug log
+    console.log("About to send media:", product.image_url);
     message.media(product.image_url);
     console.log("✅ Media attached successfully");
   } else {
     console.log("⚠️ No image URL — skipping media");
   }
-  console.log("=================================");
 }
 
 // 3. WhatsApp incoming messages (POST)
@@ -79,7 +79,6 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(400).end();
     }
 
-    // ✅ Raw phone — zero modification
     const phone = body.From;
     const msg = body.Body ? body.Body.trim() : "";
 
@@ -95,15 +94,13 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
-
-    // ✅ NUMBER CHECK FIRST
     const isNumber = /^[0-9]+$/.test(msg);
 
+    // ✅ NUMBER CHECK FIRST
     if (isNumber) {
       console.log(`🔢 Number received: ${msg}`);
       const index = parseInt(msg) - 1;
 
-      // Fetch session from Supabase
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
         .select("*")
@@ -111,46 +108,51 @@ app.post("/whatsapp", async (req, res) => {
         .limit(1)
         .maybeSingle();
 
-      console.log("🔍 Looking up session for:", phone);
-      console.log("📋 Session found:", JSON.stringify(session, null, 2));
+      console.log("🔍 Session lookup for:", phone);
+      console.log("📋 Session:", JSON.stringify(session, null, 2));
       console.log("❗ Session error:", sessionError ? sessionError.message : "none");
 
-      // Guard: Supabase error
       if (sessionError) {
-        console.error("❌ Supabase session error:", sessionError.message);
-        twiml.message(
-          `⚠️ Something went wrong. Please search again!\n\nExample: type *Black* or *Jeans*`
-        );
+        twiml.message(`⚠️ Something went wrong. Please search again!\n\nExample: type *Black* or *Jeans*`);
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
       }
 
-      // Guard: no session found
       if (!session || !session.last_results) {
-        console.log("⚠️ No session found for:", phone);
-        twiml.message(
-          `⚠️ Session expired. Please search again!\n\nExample: type *Black* or *Jeans*`
-        );
+        twiml.message(`⚠️ Session expired. Please search again!\n\nExample: type *Black* or *Jeans*`);
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
       }
 
-      const product = session.last_results[index];
+      const sessionProduct = session.last_results[index];
 
-      // Guard: invalid index
-      if (!product) {
+      if (!sessionProduct) {
         const max = session.last_results.length;
-        console.log(`⚠️ Invalid index ${index} — only ${max} results`);
-        twiml.message(
-          `⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`
-        );
+        twiml.message(`⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`);
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
       }
 
-      // ✅ Path 2 — Send product + image via shared function
-      console.log("SELECTED PRODUCT:", JSON.stringify(product, null, 2));
-      sendProductMessage(twiml, product);
+      // ✅ KEY FIX — re-fetch product fresh from Supabase using product_name
+      // This guarantees image_url and ALL fields are always present
+      const { data: freshProduct, error: fetchError } = await supabase
+        .from("products")
+        .select("*")
+        .eq("product_name", sessionProduct.product_name)
+        .maybeSingle();
+
+      console.log("🔄 Fresh product fetch:", JSON.stringify(freshProduct, null, 2));
+      console.log("❗ Fetch error:", fetchError ? fetchError.message : "none");
+
+      if (fetchError || !freshProduct) {
+        console.error("❌ Could not fetch fresh product");
+        twiml.message(`⚠️ Product not found. Please search again!`);
+        res.writeHead(200, { "Content-Type": "text/xml" });
+        return res.end(twiml.toString());
+      }
+
+      // ✅ Send using fresh product — image_url guaranteed
+      sendProductMessage(twiml, freshProduct);
 
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml.toString());
@@ -161,46 +163,37 @@ app.post("/whatsapp", async (req, res) => {
 
     const { data, error } = await supabase
       .from("products")
-      .select("*")
-      .or(
-        `product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`
-      );
+      .select("*") // ✅ fetches ALL columns including image_url
+      .or(`product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`);
 
     console.log("📊 Products found:", data ? data.length : 0);
     console.log("❗ Search error:", error ? error.message : "none");
 
     if (data && data.length > 0) {
 
-      // ✅ Save session with raw phone
+      // ✅ Save full product data including image_url to session
       const { error: upsertError } = await supabase
         .from("user_sessions")
         .upsert({
           phone_number: phone,
-          last_results: data
+          last_results: data  // ✅ full product objects saved
         });
 
       if (upsertError) {
         console.error("❌ Session save error:", upsertError.message);
       } else {
         console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
+        // ✅ Log first product to confirm image_url is saved
+        console.log("✅ First product saved:", JSON.stringify(data[0], null, 2));
       }
 
-      // ✅ Verify session saved
-      const { data: verify } = await supabase
-        .from("user_sessions")
-        .select("phone_number")
-        .eq("phone_number", phone)
-        .maybeSingle();
-
-      console.log("🔎 Session verification:", verify ? "SAVED ✅" : "NOT SAVED ❌");
-
-      // ✅ Single result — send details + image directly
+      // ✅ Single result — send directly with image
       if (data.length === 1) {
-        console.log("✅ Single product found — sending details directly");
+        console.log("✅ Single product — sending directly");
         sendProductMessage(twiml, data[0]);
 
       } else {
-        // ✅ Multiple results — show numbered list
+        // ✅ Multiple results — numbered list
         let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
         data.forEach((product, index) => {
@@ -209,9 +202,7 @@ app.post("/whatsapp", async (req, res) => {
           response += `   📦 Stock: ${product.stock}\n`;
           response += `   📐 Size: ${product.size}\n`;
           response += `   🎨 Color: ${product.color}\n`;
-          response += product.image_url
-            ? `   🖼️ Image available\n\n`
-            : `\n`;
+          response += product.image_url ? `   🖼️ Image available\n\n` : `\n`;
         });
 
         response += `_Reply with a number (1, 2, 3...) to see full details + image!_`;
@@ -219,10 +210,9 @@ app.post("/whatsapp", async (req, res) => {
       }
 
     } else {
-      console.log("⚠️ No product found for:", msg);
       twiml.message(
         `Sorry, we couldn't find any product matching "${msg}". 😔\n\n` +
-        `Try searching with a different keyword!\n` +
+        `Try a different keyword!\n` +
         `Example: *Black*, *Jeans*, *XL*`
       );
     }
@@ -236,35 +226,22 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// 4. Products route - fetch all from Supabase
+// 4. Products route
 app.get("/products", async (req, res) => {
   try {
-    console.log("📦 Fetching products from Supabase...");
-
-    const { data, error } = await supabase
-      .from("products")
-      .select("*");
+    const { data, error } = await supabase.from("products").select("*");
 
     if (error) {
-      console.error("❌ Supabase error:", error.message);
-      return res.status(500).json({
-        error: error.message,
-        hint: "Check your Supabase table name and environment variables"
-      });
+      return res.status(500).json({ error: error.message });
     }
 
     if (!data || data.length === 0) {
-      return res.status(200).json({
-        message: "No products found",
-        hint: "Check if table is named exactly 'products' and has data"
-      });
+      return res.status(200).json({ message: "No products found" });
     }
 
-    console.log(`✅ ${data.length} products fetched`);
     res.status(200).json(data);
 
   } catch (error) {
-    console.error("❌ Error fetching products:", error.message);
     res.status(500).json({ error: "Something went wrong" });
   }
 });
