@@ -55,13 +55,18 @@ function sendProductMessage(twiml, product) {
     `_Search another keyword to find more products!_`
   );
 
-  // ✅ Attach image if URL exists
+  // ✅ Debug logs added exactly as requested
+  console.log("=================================");
+  console.log("Selected image:", product.image_url || "NONE — no image_url found");
+  
   if (product.image_url) {
-    console.log(`🖼️ Attaching image: ${product.image_url}`);
+    console.log("About to send media:", product.image_url); // ✅ exact debug log
     message.media(product.image_url);
+    console.log("✅ Media attached successfully");
   } else {
-    console.log("ℹ️ No image URL for this product");
+    console.log("⚠️ No image URL — skipping media");
   }
+  console.log("=================================");
 }
 
 // 3. WhatsApp incoming messages (POST)
@@ -143,11 +148,8 @@ app.post("/whatsapp", async (req, res) => {
         return res.end(twiml.toString());
       }
 
-      // ✅ Debug — verify product and image URL
+      // ✅ Path 2 — Send product + image via shared function
       console.log("SELECTED PRODUCT:", JSON.stringify(product, null, 2));
-      console.log("IMAGE URL:", product.image_url || "none");
-
-      // ✅ Path 2 — Send product details + image using shared function
       sendProductMessage(twiml, product);
 
       res.writeHead(200, { "Content-Type": "text/xml" });
@@ -192,11 +194,9 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log("🔎 Session verification:", verify ? "SAVED ✅" : "NOT SAVED ❌");
 
-      // ✅ If only 1 result — send details + image directly (Path 1)
+      // ✅ Single result — send details + image directly
       if (data.length === 1) {
         console.log("✅ Single product found — sending details directly");
-        console.log("SELECTED PRODUCT:", JSON.stringify(data[0], null, 2));
-        console.log("IMAGE URL:", data[0].image_url || "none");
         sendProductMessage(twiml, data[0]);
 
       } else {
