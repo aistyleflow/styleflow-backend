@@ -41,6 +41,29 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
+// ✅ Reusable function — sends product details + image in both paths
+function sendProductMessage(twiml, product) {
+  const message = twiml.message();
+
+  message.body(
+    `🛍️ *Product Details*\n\n` +
+    `📦 Product: ${product.product_name}\n` +
+    `💰 Price: ₹${product.price}\n` +
+    `📦 Stock: ${product.stock}\n` +
+    `📐 Size: ${product.size}\n` +
+    `🎨 Color: ${product.color}\n\n` +
+    `_Search another keyword to find more products!_`
+  );
+
+  // ✅ Attach image if URL exists
+  if (product.image_url) {
+    console.log(`🖼️ Attaching image: ${product.image_url}`);
+    message.media(product.image_url);
+  } else {
+    console.log("ℹ️ No image URL for this product");
+  }
+}
+
 // 3. WhatsApp incoming messages (POST)
 app.post("/whatsapp", async (req, res) => {
   try {
@@ -120,27 +143,12 @@ app.post("/whatsapp", async (req, res) => {
         return res.end(twiml.toString());
       }
 
-      console.log(`✅ Product selected: ${product.product_name}`);
+      // ✅ Debug — verify product and image URL
+      console.log("SELECTED PRODUCT:", JSON.stringify(product, null, 2));
+      console.log("IMAGE URL:", product.image_url || "none");
 
-      // ✅ Send product details with image if available
-      const productMsg = twiml.message();
-      productMsg.body(
-        `🛍️ *Product Details*\n\n` +
-        `📦 Product: ${product.product_name}\n` +
-        `💰 Price: ₹${product.price}\n` +
-        `📦 Stock: ${product.stock}\n` +
-        `📐 Size: ${product.size}\n` +
-        `🎨 Color: ${product.color}\n\n` +
-        `_Search another keyword to find more products!_`
-      );
-
-      // ✅ Attach image only if URL exists
-      if (product.image_url) {
-        console.log(`🖼️ Attaching image: ${product.image_url}`);
-        productMsg.media(product.image_url);
-      } else {
-        console.log("ℹ️ No image URL for this product");
-      }
+      // ✅ Path 2 — Send product details + image using shared function
+      sendProductMessage(twiml, product);
 
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml.toString());
@@ -175,7 +183,7 @@ app.post("/whatsapp", async (req, res) => {
         console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
       }
 
-      // ✅ Verify session was saved
+      // ✅ Verify session saved
       const { data: verify } = await supabase
         .from("user_sessions")
         .select("phone_number")
@@ -184,21 +192,31 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log("🔎 Session verification:", verify ? "SAVED ✅" : "NOT SAVED ❌");
 
-      // ✅ Show numbered list with image indicator
-      let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
+      // ✅ If only 1 result — send details + image directly (Path 1)
+      if (data.length === 1) {
+        console.log("✅ Single product found — sending details directly");
+        console.log("SELECTED PRODUCT:", JSON.stringify(data[0], null, 2));
+        console.log("IMAGE URL:", data[0].image_url || "none");
+        sendProductMessage(twiml, data[0]);
 
-      data.forEach((product, index) => {
-        response += `${index + 1}. *${product.product_name}*\n`;
-        response += `   💰 ₹${product.price}\n`;
-        response += `   📦 Stock: ${product.stock}\n`;
-        response += `   📐 Size: ${product.size}\n`;
-        response += `   🎨 Color: ${product.color}\n`;
-        response += product.image_url ? `   🖼️ Image available\n\n` : `\n`; // ✅ hint for image
-      });
+      } else {
+        // ✅ Multiple results — show numbered list
+        let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
-      response += `_Reply with a number (1, 2, 3...) to see full details + image!_`; // ✅ updated hint
+        data.forEach((product, index) => {
+          response += `${index + 1}. *${product.product_name}*\n`;
+          response += `   💰 ₹${product.price}\n`;
+          response += `   📦 Stock: ${product.stock}\n`;
+          response += `   📐 Size: ${product.size}\n`;
+          response += `   🎨 Color: ${product.color}\n`;
+          response += product.image_url
+            ? `   🖼️ Image available\n\n`
+            : `\n`;
+        });
 
-      twiml.message(response);
+        response += `_Reply with a number (1, 2, 3...) to see full details + image!_`;
+        twiml.message(response);
+      }
 
     } else {
       console.log("⚠️ No product found for:", msg);
