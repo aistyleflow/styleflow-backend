@@ -51,11 +51,10 @@ app.post("/whatsapp", async (req, res) => {
       return res.status(400).end();
     }
 
-    // ✅ Use raw Twilio value — NO modification at all
+    // ✅ Raw phone — zero modification
     const phone = body.From;
     const msg = body.Body ? body.Body.trim() : "";
 
-    // ✅ Debug — verify exact phone format in Render logs
     console.log("=================================");
     console.log("📩 New message received");
     console.log("PHONE RAW VALUE:", phone);
@@ -76,7 +75,7 @@ app.post("/whatsapp", async (req, res) => {
       console.log(`🔢 Number received: ${msg}`);
       const index = parseInt(msg) - 1;
 
-      // ✅ Read session using maybeSingle to avoid crash
+      // Fetch session from Supabase
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
         .select("*")
@@ -84,12 +83,11 @@ app.post("/whatsapp", async (req, res) => {
         .limit(1)
         .maybeSingle();
 
-      // ✅ Full debug for session lookup
       console.log("🔍 Looking up session for:", phone);
       console.log("📋 Session found:", JSON.stringify(session, null, 2));
       console.log("❗ Session error:", sessionError ? sessionError.message : "none");
 
-      // Guard: session error from Supabase
+      // Guard: Supabase error
       if (sessionError) {
         console.error("❌ Supabase session error:", sessionError.message);
         twiml.message(
@@ -114,7 +112,7 @@ app.post("/whatsapp", async (req, res) => {
       // Guard: invalid index
       if (!product) {
         const max = session.last_results.length;
-        console.log(`⚠️ Invalid index ${index} — only ${max} results available`);
+        console.log(`⚠️ Invalid index ${index} — only ${max} results`);
         twiml.message(
           `⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`
         );
@@ -124,7 +122,9 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log(`✅ Product selected: ${product.product_name}`);
 
-      twiml.message(
+      // ✅ Send product details with image if available
+      const productMsg = twiml.message();
+      productMsg.body(
         `🛍️ *Product Details*\n\n` +
         `📦 Product: ${product.product_name}\n` +
         `💰 Price: ₹${product.price}\n` +
@@ -133,6 +133,14 @@ app.post("/whatsapp", async (req, res) => {
         `🎨 Color: ${product.color}\n\n` +
         `_Search another keyword to find more products!_`
       );
+
+      // ✅ Attach image only if URL exists
+      if (product.image_url) {
+        console.log(`🖼️ Attaching image: ${product.image_url}`);
+        productMsg.media(product.image_url);
+      } else {
+        console.log("ℹ️ No image URL for this product");
+      }
 
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml.toString());
@@ -153,7 +161,7 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ Save session with raw phone — no onConflict to avoid mismatch
+      // ✅ Save session with raw phone
       const { error: upsertError } = await supabase
         .from("user_sessions")
         .upsert({
@@ -167,7 +175,7 @@ app.post("/whatsapp", async (req, res) => {
         console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
       }
 
-      // ✅ Verify session was actually saved
+      // ✅ Verify session was saved
       const { data: verify } = await supabase
         .from("user_sessions")
         .select("phone_number")
@@ -176,6 +184,7 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log("🔎 Session verification:", verify ? "SAVED ✅" : "NOT SAVED ❌");
 
+      // ✅ Show numbered list with image indicator
       let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
       data.forEach((product, index) => {
@@ -183,10 +192,12 @@ app.post("/whatsapp", async (req, res) => {
         response += `   💰 ₹${product.price}\n`;
         response += `   📦 Stock: ${product.stock}\n`;
         response += `   📐 Size: ${product.size}\n`;
-        response += `   🎨 Color: ${product.color}\n\n`;
+        response += `   🎨 Color: ${product.color}\n`;
+        response += product.image_url ? `   🖼️ Image available\n\n` : `\n`; // ✅ hint for image
       });
 
-      response += `_Reply with a number (1, 2, 3...) to see full details!_`;
+      response += `_Reply with a number (1, 2, 3...) to see full details + image!_`; // ✅ updated hint
+
       twiml.message(response);
 
     } else {
