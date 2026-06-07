@@ -56,6 +56,22 @@ async function isImageAccessible(url) {
   }
 }
 
+// ✅ Send message via Twilio REST API directly
+async function sendWhatsAppMessage(to, messageBody) {
+  try {
+    const message = await client.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to: to,
+      body: messageBody
+    });
+    console.log("✅ Message sent via REST API — SID:", message.sid);
+    return true;
+  } catch (err) {
+    console.error("❌ REST API send error:", err.message);
+    return false;
+  }
+}
+
 // ✅ Reusable function — sends product details + image
 async function sendProductMessage(twiml, product) {
   console.log("FULL PRODUCT OBJECT:", JSON.stringify(product, null, 2));
@@ -87,6 +103,68 @@ async function sendProductMessage(twiml, product) {
   }
 }
 
+// ✅ Safe session save
+async function saveSession(phone, data) {
+  try {
+    const { data: existing } = await supabase
+      .from("user_sessions")
+      .select("phone_number")
+      .eq("phone_number", phone)
+      .maybeSingle();
+
+    let saveError;
+
+    if (existing) {
+      const { error } = await supabase
+        .from("user_sessions")
+        .update({ last_results: data })
+        .eq("phone_number", phone);
+      saveError = error;
+      console.log("🔄 Session updated for:", phone);
+    } else {
+      const { error } = await supabase
+        .from("user_sessions")
+        .insert({ phone_number: phone, last_results: data });
+      saveError = error;
+      console.log("🆕 Session created for:", phone);
+    }
+
+    if (saveError) {
+      console.error("❌ Session save error:", saveError.message);
+      return false;
+    }
+
+    const { data: verify } = await supabase
+      .from("user_sessions")
+      .select("last_results")
+      .eq("phone_number", phone)
+      .maybeSingle();
+
+    if (verify && verify.last_results) {
+      console.log(`✅ Session verified — ${verify.last_results.length} products saved`);
+      verify.last_results.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.product_name}`);
+      });
+      return true;
+    } else {
+      console.error("❌ Session verification failed");
+      return false;
+    }
+
+  } catch (err) {
+    console.error("❌ Session save exception:", err.message);
+    return false;
+  }
+}
+
+// ✅ TwiML response helper
+function sendTwiml(res, twiml) {
+  const xml = twiml.toString();
+  console.log("📤 Final TwiML:", xml);
+  res.setHeader("Content-Type", "text/xml");
+  res.status(200).send(xml);
+}
+
 // 3. WhatsApp incoming messages (POST)
 app.post("/whatsapp", async (req, res) => {
   try {
@@ -99,7 +177,7 @@ app.post("/whatsapp", async (req, res) => {
 
     const phone = body.From;
     const msg = body.Body ? body.Body.trim() : "";
-    const msgLower = msg.toLowerCase(); // ✅ lowercase for comparison
+    const msgLower = msg.toLowerCase();
 
     console.log("=================================");
     console.log("📩 New message received");
@@ -114,19 +192,16 @@ app.post("/whatsapp", async (req, res) => {
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ Bug 2 Fix — GREETING CHECK FIRST
+    // ✅ 1. GREETING — send via REST API directly, bypass TwiML
     if (GREETINGS.includes(msgLower)) {
-      console.log("👋 Greeting received — sending welcome message");
+      console.log("👋 Greeting received — sending via REST API");
 
-      // ✅ Clear old session so fresh start
-      await supabase
-        .from("user_sessions")
-        .delete()
-        .eq("phone_number", phone);
+      // ✅ Respond to Twilio immediately with empty 200
+      res.status(200).end();
 
-      console.log("🗑️ Old session cleared for:", phone);
-
-      twiml.message(
+      // ✅ Send message separately via REST API
+      await sendWhatsAppMessage(
+        phone,
         `👋 Welcome to *StyleFlow*! 🛍️\n\n` +
         `We are your personal fashion assistant.\n\n` +
         `🔍 *How to shop:*\n` +
@@ -138,16 +213,15 @@ app.post("/whatsapp", async (req, res) => {
         `Happy Shopping! 🎉`
       );
 
-      res.writeHead(200, { "Content-Type": "text/xml" });
-      return res.end(twiml.toString());
+      return;
     }
 
-    // ✅ Bug 1 Fix — NUMBER CHECK SECOND
+    // ✅ 2. NUMBER CHECK SECOND
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
       console.log(`🔢 Number received: ${msg}`);
-      const index = parseInt(msg) - 1; // ✅ 1→0, 2→1, 3→2
+      const index = parseInt(msg) - 1;
 
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
@@ -157,61 +231,51 @@ app.post("/whatsapp", async (req, res) => {
         .maybeSingle();
 
       console.log("🔍 Session lookup for:", phone);
-      console.log("📋 Session results count:", session?.last_results?.length || 0);
       console.log("❗ Session error:", sessionError ? sessionError.message : "none");
 
       if (sessionError) {
         twiml.message(`⚠️ Something went wrong. Please search again!\n\nExample: type *Black* or *Jeans*`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
       if (!session || !session.last_results) {
         twiml.message(`⚠️ Session expired. Please search again!\n\nExample: type *Black* or *Jeans*`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
-      // ✅ Bug 1 Fix — log index vs results to catch mismatch
-      console.log(`🔢 Index requested: ${index}`);
-      console.log(`📦 Total results in session: ${session.last_results.length}`);
-      console.log(`📦 Session results:`, session.last_results.map((p, i) => `${i}: ${p.product_name}`));
+      console.log("📦 Products in session (in order):");
+      session.last_results.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.product_name}`);
+      });
+      console.log(`🎯 Selected: ${msg} → index ${index} → ${session.last_results[index]?.product_name}`);
 
       const sessionProduct = session.last_results[index];
 
       if (!sessionProduct) {
         const max = session.last_results.length;
-        console.log(`⚠️ Invalid index ${index} — only ${max} results`);
         twiml.message(`⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
-      console.log(`✅ Session product at index ${index}: ${sessionProduct.product_name}`);
-
-      // ✅ Re-fetch fresh product from Supabase using product_name
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
         .eq("product_name", sessionProduct.product_name)
         .maybeSingle();
 
-      console.log("🔄 Fresh product:", JSON.stringify(freshProduct, null, 2));
+      console.log("🔄 Fresh product fetched:", freshProduct?.product_name);
       console.log("❗ Fetch error:", fetchError ? fetchError.message : "none");
 
       if (fetchError || !freshProduct) {
         twiml.message(`⚠️ Product not found. Please search again!`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
       await sendProductMessage(twiml, freshProduct);
-
-      res.writeHead(200, { "Content-Type": "text/xml" });
-      return res.end(twiml.toString());
+      return sendTwiml(res, twiml);
     }
 
-    // ✅ SEARCH LOGIC THIRD
+    // ✅ 3. SEARCH LOGIC THIRD
     console.log(`🔍 Searching products for: "${msg}"`);
 
     const { data, error } = await supabase
@@ -224,29 +288,16 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ Save fresh session — overwrites any old session
-      const { error: upsertError } = await supabase
-        .from("user_sessions")
-        .upsert({
-          phone_number: phone,
-          last_results: data
-        });
-
-      if (upsertError) {
-        console.error("❌ Session save error:", upsertError.message);
-      } else {
-        console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
-        // ✅ Log all saved products with their index
-        data.forEach((p, i) => console.log(`   ${i + 1}. ${p.product_name}`));
+      const saved = await saveSession(phone, data);
+      if (!saved) {
+        console.error("❌ Session could not be saved");
       }
 
-      // ✅ Single result — send directly with image
       if (data.length === 1) {
         console.log("✅ Single product — sending directly");
         await sendProductMessage(twiml, data[0]);
 
       } else {
-        // ✅ Multiple results — numbered list
         let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
         data.forEach((product, index) => {
@@ -271,8 +322,7 @@ app.post("/whatsapp", async (req, res) => {
       );
     }
 
-    res.writeHead(200, { "Content-Type": "text/xml" });
-    res.end(twiml.toString());
+    return sendTwiml(res, twiml);
 
   } catch (error) {
     console.error("❌ Error handling message:", error.message);
