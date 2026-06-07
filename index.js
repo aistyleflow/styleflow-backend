@@ -19,6 +19,9 @@ const supabase = createClient(
   process.env.SUPABASE_ANON_KEY
 );
 
+// ✅ Greeting keywords
+const GREETINGS = ["hi", "hello", "hey", "helo", "hii", "start", "namaste"];
+
 // 1. Home route
 app.get("/", (req, res) => {
   res.send("StyleFlow is running!");
@@ -41,12 +44,12 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
-// ✅ Check if image URL is valid and publicly accessible
+// ✅ Check if image URL is publicly accessible
 async function isImageAccessible(url) {
   try {
     const response = await fetch(url, { method: "HEAD" });
     console.log(`🔎 Image URL check: ${url} → status ${response.status}`);
-    return response.ok; // true if 200
+    return response.ok;
   } catch (err) {
     console.error("❌ Image URL not accessible:", err.message);
     return false;
@@ -55,7 +58,6 @@ async function isImageAccessible(url) {
 
 // ✅ Reusable function — sends product details + image
 async function sendProductMessage(twiml, product) {
-
   console.log("FULL PRODUCT OBJECT:", JSON.stringify(product, null, 2));
   console.log("Selected image:", product.image_url || "NONE");
 
@@ -72,16 +74,13 @@ async function sendProductMessage(twiml, product) {
   );
 
   if (product.image_url) {
-    // ✅ Verify image is publicly accessible before sending
     const accessible = await isImageAccessible(product.image_url);
-
     if (accessible) {
       console.log("About to send media:", product.image_url);
       message.media(product.image_url);
       console.log("✅ Media attached successfully");
     } else {
-      console.log("❌ Image URL not publicly accessible — Twilio cannot fetch it");
-      console.log("👉 Fix: Make your Supabase storage bucket PUBLIC");
+      console.log("❌ Image not publicly accessible");
     }
   } else {
     console.log("⚠️ No image URL — skipping media");
@@ -100,6 +99,7 @@ app.post("/whatsapp", async (req, res) => {
 
     const phone = body.From;
     const msg = body.Body ? body.Body.trim() : "";
+    const msgLower = msg.toLowerCase(); // ✅ lowercase for comparison
 
     console.log("=================================");
     console.log("📩 New message received");
@@ -113,12 +113,41 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     const twiml = new twilio.twiml.MessagingResponse();
+
+    // ✅ Bug 2 Fix — GREETING CHECK FIRST
+    if (GREETINGS.includes(msgLower)) {
+      console.log("👋 Greeting received — sending welcome message");
+
+      // ✅ Clear old session so fresh start
+      await supabase
+        .from("user_sessions")
+        .delete()
+        .eq("phone_number", phone);
+
+      console.log("🗑️ Old session cleared for:", phone);
+
+      twiml.message(
+        `👋 Welcome to *StyleFlow*! 🛍️\n\n` +
+        `We are your personal fashion assistant.\n\n` +
+        `🔍 *How to shop:*\n` +
+        `Just type what you are looking for!\n\n` +
+        `Examples:\n` +
+        `• Type *Black* to see black products\n` +
+        `• Type *Jeans* to see all jeans\n` +
+        `• Type *XL* to see XL size items\n\n` +
+        `Happy Shopping! 🎉`
+      );
+
+      res.writeHead(200, { "Content-Type": "text/xml" });
+      return res.end(twiml.toString());
+    }
+
+    // ✅ Bug 1 Fix — NUMBER CHECK SECOND
     const isNumber = /^[0-9]+$/.test(msg);
 
-    // ✅ NUMBER CHECK FIRST
     if (isNumber) {
       console.log(`🔢 Number received: ${msg}`);
-      const index = parseInt(msg) - 1;
+      const index = parseInt(msg) - 1; // ✅ 1→0, 2→1, 3→2
 
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
@@ -128,7 +157,7 @@ app.post("/whatsapp", async (req, res) => {
         .maybeSingle();
 
       console.log("🔍 Session lookup for:", phone);
-      console.log("📋 Session:", JSON.stringify(session, null, 2));
+      console.log("📋 Session results count:", session?.last_results?.length || 0);
       console.log("❗ Session error:", sessionError ? sessionError.message : "none");
 
       if (sessionError) {
@@ -143,16 +172,24 @@ app.post("/whatsapp", async (req, res) => {
         return res.end(twiml.toString());
       }
 
+      // ✅ Bug 1 Fix — log index vs results to catch mismatch
+      console.log(`🔢 Index requested: ${index}`);
+      console.log(`📦 Total results in session: ${session.last_results.length}`);
+      console.log(`📦 Session results:`, session.last_results.map((p, i) => `${i}: ${p.product_name}`));
+
       const sessionProduct = session.last_results[index];
 
       if (!sessionProduct) {
         const max = session.last_results.length;
+        console.log(`⚠️ Invalid index ${index} — only ${max} results`);
         twiml.message(`⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`);
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
       }
 
-      // ✅ Re-fetch fresh product from Supabase — guarantees all fields
+      console.log(`✅ Session product at index ${index}: ${sessionProduct.product_name}`);
+
+      // ✅ Re-fetch fresh product from Supabase using product_name
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
@@ -174,7 +211,7 @@ app.post("/whatsapp", async (req, res) => {
       return res.end(twiml.toString());
     }
 
-    // ✅ SEARCH LOGIC SECOND
+    // ✅ SEARCH LOGIC THIRD
     console.log(`🔍 Searching products for: "${msg}"`);
 
     const { data, error } = await supabase
@@ -187,6 +224,7 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
+      // ✅ Save fresh session — overwrites any old session
       const { error: upsertError } = await supabase
         .from("user_sessions")
         .upsert({
@@ -198,7 +236,8 @@ app.post("/whatsapp", async (req, res) => {
         console.error("❌ Session save error:", upsertError.message);
       } else {
         console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
-        console.log("✅ First product saved:", JSON.stringify(data[0], null, 2));
+        // ✅ Log all saved products with their index
+        data.forEach((p, i) => console.log(`   ${i + 1}. ${p.product_name}`));
       }
 
       // ✅ Single result — send directly with image
@@ -224,6 +263,7 @@ app.post("/whatsapp", async (req, res) => {
       }
 
     } else {
+      console.log("⚠️ No product found for:", msg);
       twiml.message(
         `Sorry, we couldn't find any product matching "${msg}". 😔\n\n` +
         `Try a different keyword!\n` +
