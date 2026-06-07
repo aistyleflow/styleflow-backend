@@ -90,7 +90,6 @@ async function sendProductMessage(twiml, product) {
 // ✅ Safe session save — guaranteed to work
 async function saveSession(phone, data) {
   try {
-    // ✅ Check if session exists first
     const { data: existing } = await supabase
       .from("user_sessions")
       .select("phone_number")
@@ -100,7 +99,6 @@ async function saveSession(phone, data) {
     let saveError;
 
     if (existing) {
-      // ✅ Session exists — UPDATE only last_results
       const { error } = await supabase
         .from("user_sessions")
         .update({ last_results: data })
@@ -108,7 +106,6 @@ async function saveSession(phone, data) {
       saveError = error;
       console.log("🔄 Session updated for:", phone);
     } else {
-      // ✅ No session — INSERT fresh
       const { error } = await supabase
         .from("user_sessions")
         .insert({ phone_number: phone, last_results: data });
@@ -121,7 +118,7 @@ async function saveSession(phone, data) {
       return false;
     }
 
-    // ✅ Verify session was saved correctly
+    // ✅ Verify session saved correctly
     const { data: verify } = await supabase
       .from("user_sessions")
       .select("last_results")
@@ -135,7 +132,7 @@ async function saveSession(phone, data) {
       });
       return true;
     } else {
-      console.error("❌ Session verification failed — data not found after save");
+      console.error("❌ Session verification failed");
       return false;
     }
 
@@ -172,18 +169,11 @@ app.post("/whatsapp", async (req, res) => {
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ 1. GREETING CHECK FIRST
+    // ✅ 1. GREETING CHECK FIRST — only welcome message, nothing else
     if (GREETINGS.includes(msgLower)) {
-      console.log("👋 Greeting received");
+      console.log("👋 Greeting received — sending welcome message only");
 
-      // ✅ Safe delete — only clear last_results, keep the row
-      await supabase
-        .from("user_sessions")
-        .update({ last_results: null })
-        .eq("phone_number", phone);
-
-      console.log("🗑️ Session cleared for:", phone);
-
+      // ✅ NO session clear — just send welcome message
       twiml.message(
         `👋 Welcome to *StyleFlow*! 🛍️\n\n` +
         `We are your personal fashion assistant.\n\n` +
@@ -280,11 +270,10 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ Use safe session save function — no more empty sessions
+      // ✅ Safe session save
       const saved = await saveSession(phone, data);
-
       if (!saved) {
-        console.error("❌ Session could not be saved — number selection may not work");
+        console.error("❌ Session could not be saved");
       }
 
       // ✅ Single result — send directly with image
