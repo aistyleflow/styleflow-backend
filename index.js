@@ -87,6 +87,64 @@ async function sendProductMessage(twiml, product) {
   }
 }
 
+// ✅ Safe session save — guaranteed to work
+async function saveSession(phone, data) {
+  try {
+    // ✅ Check if session exists first
+    const { data: existing } = await supabase
+      .from("user_sessions")
+      .select("phone_number")
+      .eq("phone_number", phone)
+      .maybeSingle();
+
+    let saveError;
+
+    if (existing) {
+      // ✅ Session exists — UPDATE only last_results
+      const { error } = await supabase
+        .from("user_sessions")
+        .update({ last_results: data })
+        .eq("phone_number", phone);
+      saveError = error;
+      console.log("🔄 Session updated for:", phone);
+    } else {
+      // ✅ No session — INSERT fresh
+      const { error } = await supabase
+        .from("user_sessions")
+        .insert({ phone_number: phone, last_results: data });
+      saveError = error;
+      console.log("🆕 Session created for:", phone);
+    }
+
+    if (saveError) {
+      console.error("❌ Session save error:", saveError.message);
+      return false;
+    }
+
+    // ✅ Verify session was saved correctly
+    const { data: verify } = await supabase
+      .from("user_sessions")
+      .select("last_results")
+      .eq("phone_number", phone)
+      .maybeSingle();
+
+    if (verify && verify.last_results) {
+      console.log(`✅ Session verified — ${verify.last_results.length} products saved`);
+      verify.last_results.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.product_name}`);
+      });
+      return true;
+    } else {
+      console.error("❌ Session verification failed — data not found after save");
+      return false;
+    }
+
+  } catch (err) {
+    console.error("❌ Session save exception:", err.message);
+    return false;
+  }
+}
+
 // 3. WhatsApp incoming messages (POST)
 app.post("/whatsapp", async (req, res) => {
   try {
@@ -118,9 +176,10 @@ app.post("/whatsapp", async (req, res) => {
     if (GREETINGS.includes(msgLower)) {
       console.log("👋 Greeting received");
 
+      // ✅ Safe delete — only clear last_results, keep the row
       await supabase
         .from("user_sessions")
-        .delete()
+        .update({ last_results: null })
         .eq("phone_number", phone);
 
       console.log("🗑️ Session cleared for:", phone);
@@ -146,7 +205,7 @@ app.post("/whatsapp", async (req, res) => {
 
     if (isNumber) {
       console.log(`🔢 Number received: ${msg}`);
-      const index = parseInt(msg) - 1; // 1→0, 2→1, 3→2
+      const index = parseInt(msg) - 1;
 
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
@@ -170,12 +229,12 @@ app.post("/whatsapp", async (req, res) => {
         return res.end(twiml.toString());
       }
 
-      // ✅ Log exact session order to verify
+      // ✅ Log exact order to verify
       console.log("📦 Products in session (in order):");
       session.last_results.forEach((p, i) => {
         console.log(`   ${i + 1}. ${p.product_name}`);
       });
-      console.log(`🎯 Customer selected: ${msg} → index ${index} → ${session.last_results[index]?.product_name}`);
+      console.log(`🎯 Selected: ${msg} → index ${index} → ${session.last_results[index]?.product_name}`);
 
       const sessionProduct = session.last_results[index];
 
@@ -186,7 +245,7 @@ app.post("/whatsapp", async (req, res) => {
         return res.end(twiml.toString());
       }
 
-      // ✅ Re-fetch fresh from Supabase using product_name
+      // ✅ Re-fetch fresh product from products table
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
@@ -221,30 +280,11 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ KEY FIX — delete old session first then insert fresh
-      await supabase
-        .from("user_sessions")
-        .delete()
-        .eq("phone_number", phone);
+      // ✅ Use safe session save function — no more empty sessions
+      const saved = await saveSession(phone, data);
 
-      console.log("🗑️ Old session deleted for:", phone);
-
-      // ✅ Insert fresh session with correct order
-      const { error: insertError } = await supabase
-        .from("user_sessions")
-        .insert({
-          phone_number: phone,
-          last_results: data
-        });
-
-      if (insertError) {
-        console.error("❌ Session insert error:", insertError.message);
-      } else {
-        console.log(`✅ Fresh session saved for ${phone}`);
-        console.log("📦 Saved order:");
-        data.forEach((p, i) => {
-          console.log(`   ${i + 1}. ${p.product_name}`); // ✅ verify saved order
-        });
+      if (!saved) {
+        console.error("❌ Session could not be saved — number selection may not work");
       }
 
       // ✅ Single result — send directly with image
