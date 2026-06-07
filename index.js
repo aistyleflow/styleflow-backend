@@ -99,7 +99,7 @@ app.post("/whatsapp", async (req, res) => {
 
     const phone = body.From;
     const msg = body.Body ? body.Body.trim() : "";
-    const msgLower = msg.toLowerCase(); // ✅ lowercase for comparison
+    const msgLower = msg.toLowerCase();
 
     console.log("=================================");
     console.log("📩 New message received");
@@ -114,17 +114,16 @@ app.post("/whatsapp", async (req, res) => {
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ Bug 2 Fix — GREETING CHECK FIRST
+    // ✅ 1. GREETING CHECK FIRST
     if (GREETINGS.includes(msgLower)) {
-      console.log("👋 Greeting received — sending welcome message");
+      console.log("👋 Greeting received");
 
-      // ✅ Clear old session so fresh start
       await supabase
         .from("user_sessions")
         .delete()
         .eq("phone_number", phone);
 
-      console.log("🗑️ Old session cleared for:", phone);
+      console.log("🗑️ Session cleared for:", phone);
 
       twiml.message(
         `👋 Welcome to *StyleFlow*! 🛍️\n\n` +
@@ -142,12 +141,12 @@ app.post("/whatsapp", async (req, res) => {
       return res.end(twiml.toString());
     }
 
-    // ✅ Bug 1 Fix — NUMBER CHECK SECOND
+    // ✅ 2. NUMBER CHECK SECOND
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
       console.log(`🔢 Number received: ${msg}`);
-      const index = parseInt(msg) - 1; // ✅ 1→0, 2→1, 3→2
+      const index = parseInt(msg) - 1; // 1→0, 2→1, 3→2
 
       const { data: session, error: sessionError } = await supabase
         .from("user_sessions")
@@ -157,7 +156,6 @@ app.post("/whatsapp", async (req, res) => {
         .maybeSingle();
 
       console.log("🔍 Session lookup for:", phone);
-      console.log("📋 Session results count:", session?.last_results?.length || 0);
       console.log("❗ Session error:", sessionError ? sessionError.message : "none");
 
       if (sessionError) {
@@ -172,31 +170,30 @@ app.post("/whatsapp", async (req, res) => {
         return res.end(twiml.toString());
       }
 
-      // ✅ Bug 1 Fix — log index vs results to catch mismatch
-      console.log(`🔢 Index requested: ${index}`);
-      console.log(`📦 Total results in session: ${session.last_results.length}`);
-      console.log(`📦 Session results:`, session.last_results.map((p, i) => `${i}: ${p.product_name}`));
+      // ✅ Log exact session order to verify
+      console.log("📦 Products in session (in order):");
+      session.last_results.forEach((p, i) => {
+        console.log(`   ${i + 1}. ${p.product_name}`);
+      });
+      console.log(`🎯 Customer selected: ${msg} → index ${index} → ${session.last_results[index]?.product_name}`);
 
       const sessionProduct = session.last_results[index];
 
       if (!sessionProduct) {
         const max = session.last_results.length;
-        console.log(`⚠️ Invalid index ${index} — only ${max} results`);
         twiml.message(`⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`);
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
       }
 
-      console.log(`✅ Session product at index ${index}: ${sessionProduct.product_name}`);
-
-      // ✅ Re-fetch fresh product from Supabase using product_name
+      // ✅ Re-fetch fresh from Supabase using product_name
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
         .eq("product_name", sessionProduct.product_name)
         .maybeSingle();
 
-      console.log("🔄 Fresh product:", JSON.stringify(freshProduct, null, 2));
+      console.log("🔄 Fresh product fetched:", freshProduct?.product_name);
       console.log("❗ Fetch error:", fetchError ? fetchError.message : "none");
 
       if (fetchError || !freshProduct) {
@@ -211,7 +208,7 @@ app.post("/whatsapp", async (req, res) => {
       return res.end(twiml.toString());
     }
 
-    // ✅ SEARCH LOGIC THIRD
+    // ✅ 3. SEARCH LOGIC THIRD
     console.log(`🔍 Searching products for: "${msg}"`);
 
     const { data, error } = await supabase
@@ -224,20 +221,30 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ Save fresh session — overwrites any old session
-      const { error: upsertError } = await supabase
+      // ✅ KEY FIX — delete old session first then insert fresh
+      await supabase
         .from("user_sessions")
-        .upsert({
+        .delete()
+        .eq("phone_number", phone);
+
+      console.log("🗑️ Old session deleted for:", phone);
+
+      // ✅ Insert fresh session with correct order
+      const { error: insertError } = await supabase
+        .from("user_sessions")
+        .insert({
           phone_number: phone,
           last_results: data
         });
 
-      if (upsertError) {
-        console.error("❌ Session save error:", upsertError.message);
+      if (insertError) {
+        console.error("❌ Session insert error:", insertError.message);
       } else {
-        console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
-        // ✅ Log all saved products with their index
-        data.forEach((p, i) => console.log(`   ${i + 1}. ${p.product_name}`));
+        console.log(`✅ Fresh session saved for ${phone}`);
+        console.log("📦 Saved order:");
+        data.forEach((p, i) => {
+          console.log(`   ${i + 1}. ${p.product_name}`); // ✅ verify saved order
+        });
       }
 
       // ✅ Single result — send directly with image
