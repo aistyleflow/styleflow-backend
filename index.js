@@ -141,10 +141,12 @@ async function saveSession(phone, data) {
   }
 }
 
-// ✅ Helper — send twiml response correctly every time
+// ✅ Fixed helper — use setHeader + send instead of writeHead + end
 function sendTwiml(res, twiml) {
-  res.writeHead(200, { "Content-Type": "text/xml" });
-  res.end(twiml.toString());
+  const xml = twiml.toString();
+  console.log("📤 Final TwiML being sent:", xml);
+  res.setHeader("Content-Type", "text/xml");
+  res.status(200).send(xml);
 }
 
 // 3. WhatsApp incoming messages (POST)
@@ -190,8 +192,7 @@ app.post("/whatsapp", async (req, res) => {
         `Happy Shopping! 🎉`
       );
 
-      console.log("📤 Sending greeting TwiML:", twiml.toString());
-      return sendTwiml(res, twiml); // ✅ fixed — uses same sendTwiml helper
+      return sendTwiml(res, twiml);
     }
 
     // ✅ 2. NUMBER CHECK SECOND
