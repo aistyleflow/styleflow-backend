@@ -87,7 +87,7 @@ async function sendProductMessage(twiml, product) {
   }
 }
 
-// ✅ Safe session save — guaranteed to work
+// ✅ Safe session save
 async function saveSession(phone, data) {
   try {
     const { data: existing } = await supabase
@@ -118,7 +118,6 @@ async function saveSession(phone, data) {
       return false;
     }
 
-    // ✅ Verify session saved correctly
     const { data: verify } = await supabase
       .from("user_sessions")
       .select("last_results")
@@ -140,6 +139,12 @@ async function saveSession(phone, data) {
     console.error("❌ Session save exception:", err.message);
     return false;
   }
+}
+
+// ✅ Helper — send twiml response correctly every time
+function sendTwiml(res, twiml) {
+  res.writeHead(200, { "Content-Type": "text/xml" });
+  res.end(twiml.toString());
 }
 
 // 3. WhatsApp incoming messages (POST)
@@ -169,11 +174,10 @@ app.post("/whatsapp", async (req, res) => {
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ 1. GREETING CHECK FIRST — only welcome message, nothing else
+    // ✅ 1. GREETING CHECK FIRST
     if (GREETINGS.includes(msgLower)) {
-      console.log("👋 Greeting received — sending welcome message only");
+      console.log("👋 Greeting received — sending welcome message");
 
-      // ✅ NO session clear — just send welcome message
       twiml.message(
         `👋 Welcome to *StyleFlow*! 🛍️\n\n` +
         `We are your personal fashion assistant.\n\n` +
@@ -186,8 +190,8 @@ app.post("/whatsapp", async (req, res) => {
         `Happy Shopping! 🎉`
       );
 
-      res.writeHead(200, { "Content-Type": "text/xml" });
-      return res.end(twiml.toString());
+      console.log("📤 Sending greeting TwiML:", twiml.toString());
+      return sendTwiml(res, twiml); // ✅ fixed — uses same sendTwiml helper
     }
 
     // ✅ 2. NUMBER CHECK SECOND
@@ -209,17 +213,14 @@ app.post("/whatsapp", async (req, res) => {
 
       if (sessionError) {
         twiml.message(`⚠️ Something went wrong. Please search again!\n\nExample: type *Black* or *Jeans*`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
       if (!session || !session.last_results) {
         twiml.message(`⚠️ Session expired. Please search again!\n\nExample: type *Black* or *Jeans*`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
-      // ✅ Log exact order to verify
       console.log("📦 Products in session (in order):");
       session.last_results.forEach((p, i) => {
         console.log(`   ${i + 1}. ${p.product_name}`);
@@ -231,11 +232,9 @@ app.post("/whatsapp", async (req, res) => {
       if (!sessionProduct) {
         const max = session.last_results.length;
         twiml.message(`⚠️ Invalid selection.\n\nPlease choose a number between *1* and *${max}*`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
-      // ✅ Re-fetch fresh product from products table
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
@@ -247,14 +246,11 @@ app.post("/whatsapp", async (req, res) => {
 
       if (fetchError || !freshProduct) {
         twiml.message(`⚠️ Product not found. Please search again!`);
-        res.writeHead(200, { "Content-Type": "text/xml" });
-        return res.end(twiml.toString());
+        return sendTwiml(res, twiml);
       }
 
       await sendProductMessage(twiml, freshProduct);
-
-      res.writeHead(200, { "Content-Type": "text/xml" });
-      return res.end(twiml.toString());
+      return sendTwiml(res, twiml);
     }
 
     // ✅ 3. SEARCH LOGIC THIRD
@@ -270,19 +266,16 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ Safe session save
       const saved = await saveSession(phone, data);
       if (!saved) {
         console.error("❌ Session could not be saved");
       }
 
-      // ✅ Single result — send directly with image
       if (data.length === 1) {
         console.log("✅ Single product — sending directly");
         await sendProductMessage(twiml, data[0]);
 
       } else {
-        // ✅ Multiple results — numbered list
         let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
 
         data.forEach((product, index) => {
@@ -307,8 +300,7 @@ app.post("/whatsapp", async (req, res) => {
       );
     }
 
-    res.writeHead(200, { "Content-Type": "text/xml" });
-    res.end(twiml.toString());
+    return sendTwiml(res, twiml);
 
   } catch (error) {
     console.error("❌ Error handling message:", error.message);
