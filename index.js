@@ -41,12 +41,23 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
-// ✅ Reusable function — sends product details + image
-function sendProductMessage(twiml, product) {
+// ✅ Check if image URL is valid and publicly accessible
+async function isImageAccessible(url) {
+  try {
+    const response = await fetch(url, { method: "HEAD" });
+    console.log(`🔎 Image URL check: ${url} → status ${response.status}`);
+    return response.ok; // true if 200
+  } catch (err) {
+    console.error("❌ Image URL not accessible:", err.message);
+    return false;
+  }
+}
 
-  // ✅ Show ALL fields to confirm image_url is present
+// ✅ Reusable function — sends product details + image
+async function sendProductMessage(twiml, product) {
+
   console.log("FULL PRODUCT OBJECT:", JSON.stringify(product, null, 2));
-  console.log("Selected image:", product.image_url || "NONE — no image_url found");
+  console.log("Selected image:", product.image_url || "NONE");
 
   const message = twiml.message();
 
@@ -61,9 +72,17 @@ function sendProductMessage(twiml, product) {
   );
 
   if (product.image_url) {
-    console.log("About to send media:", product.image_url);
-    message.media(product.image_url);
-    console.log("✅ Media attached successfully");
+    // ✅ Verify image is publicly accessible before sending
+    const accessible = await isImageAccessible(product.image_url);
+
+    if (accessible) {
+      console.log("About to send media:", product.image_url);
+      message.media(product.image_url);
+      console.log("✅ Media attached successfully");
+    } else {
+      console.log("❌ Image URL not publicly accessible — Twilio cannot fetch it");
+      console.log("👉 Fix: Make your Supabase storage bucket PUBLIC");
+    }
   } else {
     console.log("⚠️ No image URL — skipping media");
   }
@@ -133,26 +152,23 @@ app.post("/whatsapp", async (req, res) => {
         return res.end(twiml.toString());
       }
 
-      // ✅ KEY FIX — re-fetch product fresh from Supabase using product_name
-      // This guarantees image_url and ALL fields are always present
+      // ✅ Re-fetch fresh product from Supabase — guarantees all fields
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
         .eq("product_name", sessionProduct.product_name)
         .maybeSingle();
 
-      console.log("🔄 Fresh product fetch:", JSON.stringify(freshProduct, null, 2));
+      console.log("🔄 Fresh product:", JSON.stringify(freshProduct, null, 2));
       console.log("❗ Fetch error:", fetchError ? fetchError.message : "none");
 
       if (fetchError || !freshProduct) {
-        console.error("❌ Could not fetch fresh product");
         twiml.message(`⚠️ Product not found. Please search again!`);
         res.writeHead(200, { "Content-Type": "text/xml" });
         return res.end(twiml.toString());
       }
 
-      // ✅ Send using fresh product — image_url guaranteed
-      sendProductMessage(twiml, freshProduct);
+      await sendProductMessage(twiml, freshProduct);
 
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml.toString());
@@ -163,7 +179,7 @@ app.post("/whatsapp", async (req, res) => {
 
     const { data, error } = await supabase
       .from("products")
-      .select("*") // ✅ fetches ALL columns including image_url
+      .select("*")
       .or(`product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`);
 
     console.log("📊 Products found:", data ? data.length : 0);
@@ -171,26 +187,24 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
 
-      // ✅ Save full product data including image_url to session
       const { error: upsertError } = await supabase
         .from("user_sessions")
         .upsert({
           phone_number: phone,
-          last_results: data  // ✅ full product objects saved
+          last_results: data
         });
 
       if (upsertError) {
         console.error("❌ Session save error:", upsertError.message);
       } else {
         console.log(`✅ Session saved — PHONE: ${phone} — RESULTS: ${data.length}`);
-        // ✅ Log first product to confirm image_url is saved
         console.log("✅ First product saved:", JSON.stringify(data[0], null, 2));
       }
 
       // ✅ Single result — send directly with image
       if (data.length === 1) {
         console.log("✅ Single product — sending directly");
-        sendProductMessage(twiml, data[0]);
+        await sendProductMessage(twiml, data[0]);
 
       } else {
         // ✅ Multiple results — numbered list
@@ -231,16 +245,10 @@ app.get("/products", async (req, res) => {
   try {
     const { data, error } = await supabase.from("products").select("*");
 
-    if (error) {
-      return res.status(500).json({ error: error.message });
-    }
-
-    if (!data || data.length === 0) {
-      return res.status(200).json({ message: "No products found" });
-    }
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data || data.length === 0) return res.status(200).json({ message: "No products found" });
 
     res.status(200).json(data);
-
   } catch (error) {
     res.status(500).json({ error: "Something went wrong" });
   }
