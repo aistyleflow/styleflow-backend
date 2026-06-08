@@ -86,7 +86,7 @@ async function sendProductMessage(twiml, product) {
     `📦 Stock: ${product.stock}\n` +
     `📐 Size: ${product.size}\n` +
     `🎨 Color: ${product.color}\n\n` +
-    `_Search another keyword to find more products!_`
+    `💬 Reply *ADD* to add this product to your cart!`  // ✅ hint for ADD command
   );
 
   if (product.image_url) {
@@ -200,6 +200,7 @@ app.post("/whatsapp", async (req, res) => {
     const phone = body.From;
     const msg = body.Body ? body.Body.trim() : "";
     const msgLower = msg.toLowerCase();
+    const msgUpper = msg.toUpperCase();
 
     console.log("=================================");
     console.log("📩 New message received");
@@ -236,7 +237,73 @@ app.post("/whatsapp", async (req, res) => {
       return;
     }
 
-    // ✅ 2. NUMBER CHECK SECOND
+    // ✅ 2. ADD COMMAND SECOND
+    if (msgUpper === "ADD") {
+      console.log("🛒 ADD command received for:", phone);
+
+      const { data: session, error: sessionError } = await supabase
+        .from("user_sessions")
+        .select("selected_product_id")
+        .eq("phone_number", phone)
+        .maybeSingle();
+
+      console.log("📋 Session for ADD:", JSON.stringify(session, null, 2));
+      console.log("❗ Session error:", sessionError ? sessionError.message : "none");
+
+      // Guard: no session or no selected product
+      if (!session?.selected_product_id) {
+        console.log("⚠️ No selected_product_id found for:", phone);
+        twiml.message(
+          `⚠️ Please select a product first.\n\n` +
+          `Search for a product and select a number to view it, then type *ADD*`
+        );
+        return sendTwiml(res, twiml);
+      }
+
+      // ✅ Fetch product details for confirmation message
+      const { data: product, error: productError } = await supabase
+        .from("products")
+        .select("*")
+        .eq("id", session.selected_product_id)
+        .maybeSingle();
+
+      console.log("📦 Product to add:", product?.product_name);
+      console.log("❗ Product error:", productError ? productError.message : "none");
+
+      if (productError || !product) {
+        twiml.message(`⚠️ Product not found. Please search and select again!`);
+        return sendTwiml(res, twiml);
+      }
+
+      // ✅ Insert into cart
+      const { error: cartError } = await supabase
+        .from("cart")
+        .insert({
+          phone_number: phone,
+          product_id: session.selected_product_id,
+          quantity: 1
+        });
+
+      if (cartError) {
+        console.error("❌ Cart insert error:", cartError.message);
+        twiml.message(`⚠️ Could not add to cart. Please try again!`);
+        return sendTwiml(res, twiml);
+      }
+
+      console.log(`✅ Product added to cart — ${product.product_name} for ${phone}`);
+
+      twiml.message(
+        `✅ *Added to Cart!*\n\n` +
+        `📦 ${product.product_name}\n` +
+        `💰 ₹${product.price}\n\n` +
+        `🛒 Type *CART* to view your cart\n` +
+        `🔍 Or search for more products!`
+      );
+
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ 3. NUMBER CHECK THIRD
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
@@ -277,7 +344,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Re-fetch fresh product from products table
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
@@ -292,14 +358,14 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Save selected_product_id to session for ADD command later
+      // ✅ Save selected_product_id
       await saveSelectedProduct(phone, freshProduct.id);
 
       await sendProductMessage(twiml, freshProduct);
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 3. SEARCH LOGIC THIRD
+    // ✅ 4. SEARCH LOGIC FOURTH
     console.log(`🔍 Searching products for: "${msg}"`);
 
     const { data, error } = await supabase
@@ -319,10 +385,7 @@ app.post("/whatsapp", async (req, res) => {
 
       if (data.length === 1) {
         console.log("✅ Single product — sending directly");
-
-        // ✅ Save selected_product_id for single result too
         await saveSelectedProduct(phone, data[0].id);
-
         await sendProductMessage(twiml, data[0]);
 
       } else {
