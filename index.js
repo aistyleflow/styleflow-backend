@@ -157,6 +157,28 @@ async function saveSession(phone, data) {
   }
 }
 
+// ✅ Save selected product ID to session
+async function saveSelectedProduct(phone, productId) {
+  try {
+    const { error } = await supabase
+      .from("user_sessions")
+      .update({ selected_product_id: productId })
+      .eq("phone_number", phone);
+
+    if (error) {
+      console.error("❌ Failed to save selected_product_id:", error.message);
+      return false;
+    }
+
+    console.log(`✅ selected_product_id saved — product id: ${productId} for ${phone}`);
+    return true;
+
+  } catch (err) {
+    console.error("❌ saveSelectedProduct exception:", err.message);
+    return false;
+  }
+}
+
 // ✅ TwiML response helper
 function sendTwiml(res, twiml) {
   const xml = twiml.toString();
@@ -192,14 +214,12 @@ app.post("/whatsapp", async (req, res) => {
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ 1. GREETING — send via REST API directly, bypass TwiML
+    // ✅ 1. GREETING FIRST — via REST API
     if (GREETINGS.includes(msgLower)) {
       console.log("👋 Greeting received — sending via REST API");
 
-      // ✅ Respond to Twilio immediately with empty 200
       res.status(200).end();
 
-      // ✅ Send message separately via REST API
       await sendWhatsAppMessage(
         phone,
         `👋 Welcome to *StyleFlow*! 🛍️\n\n` +
@@ -257,6 +277,7 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
+      // ✅ Re-fetch fresh product from products table
       const { data: freshProduct, error: fetchError } = await supabase
         .from("products")
         .select("*")
@@ -270,6 +291,9 @@ app.post("/whatsapp", async (req, res) => {
         twiml.message(`⚠️ Product not found. Please search again!`);
         return sendTwiml(res, twiml);
       }
+
+      // ✅ Save selected_product_id to session for ADD command later
+      await saveSelectedProduct(phone, freshProduct.id);
 
       await sendProductMessage(twiml, freshProduct);
       return sendTwiml(res, twiml);
@@ -295,6 +319,10 @@ app.post("/whatsapp", async (req, res) => {
 
       if (data.length === 1) {
         console.log("✅ Single product — sending directly");
+
+        // ✅ Save selected_product_id for single result too
+        await saveSelectedProduct(phone, data[0].id);
+
         await sendProductMessage(twiml, data[0]);
 
       } else {
