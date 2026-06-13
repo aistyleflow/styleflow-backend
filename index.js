@@ -7,27 +7,22 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// Twilio client
 const client = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
 );
 
-// Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
 
-// ✅ Greeting keywords
 const GREETINGS = ["hi", "hello", "hey", "helo", "hii", "start", "namaste"];
 
-// 1. Home route
 app.get("/", (req, res) => {
   res.send("StyleFlow is running!");
 });
 
-// 2. WhatsApp webhook verification (GET)
 app.get("/whatsapp", (req, res) => {
   console.log("Someone accessed WhatsApp endpoint");
 
@@ -44,7 +39,6 @@ app.get("/whatsapp", (req, res) => {
   }
 });
 
-// ✅ Check if image URL is publicly accessible
 async function isImageAccessible(url) {
   try {
     const response = await fetch(url, { method: "HEAD" });
@@ -56,7 +50,6 @@ async function isImageAccessible(url) {
   }
 }
 
-// ✅ Send message via Twilio REST API directly
 async function sendWhatsAppMessage(to, messageBody) {
   try {
     const message = await client.messages.create({
@@ -72,7 +65,6 @@ async function sendWhatsAppMessage(to, messageBody) {
   }
 }
 
-// ✅ Reusable function — sends product details + image
 async function sendProductMessage(twiml, product) {
   console.log("FULL PRODUCT OBJECT:", JSON.stringify(product, null, 2));
   console.log("Selected image:", product.image_url || "NONE");
@@ -104,7 +96,6 @@ async function sendProductMessage(twiml, product) {
   }
 }
 
-// ✅ Safe session save
 async function saveSession(phone, data) {
   try {
     const { data: existing } = await supabase
@@ -155,10 +146,8 @@ async function saveSession(phone, data) {
   }
 }
 
-// ✅ Save selected product ID to session
 async function saveSelectedProduct(phone, productId) {
   try {
-    // ✅ First check session exists
     const { data: existing } = await supabase
       .from("user_sessions")
       .select("phone_number")
@@ -168,14 +157,12 @@ async function saveSelectedProduct(phone, productId) {
     let error;
 
     if (existing) {
-      // ✅ Update existing session
       const { error: updateError } = await supabase
         .from("user_sessions")
         .update({ selected_product_id: productId })
         .eq("phone_number", phone);
       error = updateError;
     } else {
-      // ✅ Create new session with product id
       const { error: insertError } = await supabase
         .from("user_sessions")
         .insert({
@@ -190,7 +177,6 @@ async function saveSelectedProduct(phone, productId) {
       return false;
     }
 
-    // ✅ Verify it was saved
     const { data: verify } = await supabase
       .from("user_sessions")
       .select("selected_product_id")
@@ -206,7 +192,6 @@ async function saveSelectedProduct(phone, productId) {
   }
 }
 
-// ✅ TwiML response helper
 function sendTwiml(res, twiml) {
   const xml = twiml.toString();
   console.log("📤 Final TwiML:", xml);
@@ -214,7 +199,6 @@ function sendTwiml(res, twiml) {
   res.status(200).send(xml);
 }
 
-// 3. WhatsApp incoming messages (POST)
 app.post("/whatsapp", async (req, res) => {
   try {
     const body = req.body;
@@ -242,7 +226,6 @@ app.post("/whatsapp", async (req, res) => {
 
     const twiml = new twilio.twiml.MessagingResponse();
 
-    // ✅ Fetch full session at top
     const { data: session, error: sessionFetchError } = await supabase
       .from("user_sessions")
       .select("*")
@@ -290,7 +273,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 3. CHECKOUT STEP — ADDRESS
+    // ✅ 3. CHECKOUT STEP — ADDRESS (store_id fixed via product loop)
     if (session?.checkout_step === "address") {
       console.log("📍 Collecting address:", msg);
 
@@ -309,6 +292,7 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
+      // ✅ Create order first (without store_id)
       const { data: order, error: orderError } = await supabase
         .from("orders")
         .insert({
@@ -326,8 +310,11 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
+      console.log(`✅ Order created — ID: ${order.id}`);
+
       let orderTotal = 0;
       let orderSummary = "";
+      let storeId = null;
 
       for (const item of cartItems) {
         const { data: product } = await supabase
@@ -337,6 +324,11 @@ app.post("/whatsapp", async (req, res) => {
           .maybeSingle();
 
         if (product) {
+          // ✅ Capture store_id from the actual product used
+          if (!storeId && product.store_id) {
+            storeId = product.store_id;
+          }
+
           await supabase.from("order_items").insert({
             order_id: order.id,
             product_id: item.product_id,
@@ -347,6 +339,18 @@ app.post("/whatsapp", async (req, res) => {
           orderTotal += itemTotal;
           orderSummary += `• ${product.product_name} × ${item.quantity} = ₹${itemTotal}\n`;
         }
+      }
+
+      console.log(`🏪 Store ID determined: ${storeId}`);
+
+      // ✅ Update order with correct store_id
+      if (storeId) {
+        const { error: updateStoreError } = await supabase
+          .from("orders")
+          .update({ store_id: storeId })
+          .eq("id", order.id);
+
+        console.log("❗ Update store_id error:", updateStoreError ? updateStoreError.message : "none");
       }
 
       await supabase.from("cart").delete().eq("phone_number", phone);
@@ -394,10 +398,9 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 5. ADD COMMAND — fully debugged
+    // ✅ 5. ADD COMMAND
     if (msgUpper === "ADD") {
       console.log("🛒 ADD command received");
-      console.log("📋 Session at ADD time:", JSON.stringify(session, null, 2));
       console.log("🔑 selected_product_id:", session?.selected_product_id || "MISSING ❌");
 
       if (!session?.selected_product_id) {
@@ -408,31 +411,23 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      console.log(`🔍 Fetching product: ${session.selected_product_id}`);
-
       const { data: product, error: productError } = await supabase
         .from("products")
         .select("*")
         .eq("id", session.selected_product_id)
         .maybeSingle();
 
-      console.log("📦 Product fetched:", product?.product_name || "NOT FOUND ❌");
-      console.log("❗ Product error:", productError ? productError.message : "none");
-
       if (productError || !product) {
         twiml.message(`⚠️ Product not found. Please search and select again!`);
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Check if already in cart
       const { data: existingCart } = await supabase
         .from("cart")
         .select("*")
         .eq("phone_number", phone)
         .eq("product_id", session.selected_product_id)
         .maybeSingle();
-
-      console.log("🛒 Existing cart item:", existingCart ? `found — qty ${existingCart.quantity}` : "none");
 
       if (existingCart) {
         const { error: updateError } = await supabase
@@ -441,7 +436,6 @@ app.post("/whatsapp", async (req, res) => {
           .eq("id", existingCart.id);
 
         if (updateError) {
-          console.error("❌ Cart update error:", updateError.message);
           twiml.message(`⚠️ Could not update cart. Please try again!`);
           return sendTwiml(res, twiml);
         }
@@ -465,10 +459,7 @@ app.post("/whatsapp", async (req, res) => {
             quantity: 1
           });
 
-        console.log("❗ Cart insert error:", cartError ? cartError.message : "none");
-
         if (cartError) {
-          console.error("❌ Cart insert error:", cartError.message);
           twiml.message(`⚠️ Could not add to cart. Please try again!`);
           return sendTwiml(res, twiml);
         }
@@ -561,18 +552,7 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      console.log(`✅ Saving selected_product_id: ${freshProduct.id}`);
       await saveSelectedProduct(phone, freshProduct.id);
-
-      // ✅ Verify immediately after saving
-      const { data: verifySession } = await supabase
-        .from("user_sessions")
-        .select("selected_product_id")
-        .eq("phone_number", phone)
-        .maybeSingle();
-
-      console.log("🔎 Verified selected_product_id in DB:", verifySession?.selected_product_id || "NOT FOUND ❌");
-
       await sendProductMessage(twiml, freshProduct);
       return sendTwiml(res, twiml);
     }
@@ -623,7 +603,6 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// 4. Products route
 app.get("/products", async (req, res) => {
   try {
     const { data, error } = await supabase.from("products").select("*");
@@ -635,13 +614,11 @@ app.get("/products", async (req, res) => {
   }
 });
 
-// 5. 404 handler
 app.use((req, res) => {
   console.log(`⚠️ Unknown route: ${req.method} ${req.url}`);
   res.status(404).send("Route not found");
 });
 
-// 6. Error handler
 app.use((err, req, res, next) => {
   console.error("❌ Error:", err.stack);
   res.status(500).send("Something went wrong!");
