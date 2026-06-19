@@ -1,27 +1,22 @@
 import { useState } from 'react'
 import { supabase } from './supabase.js'
 import Login from './Login.js'
+import Products from './Products.js'  // ✅ import Products
 
 function App() {
   const [orders, setOrders] = useState([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [owner, setOwner] = useState(null)
+  const [activeTab, setActiveTab] = useState('orders') // ✅ tab state
 
   function handleLoginSuccess(ownerData) {
-    console.log("=================================")
-    console.log("✅ handleLoginSuccess called")
-    console.log("✅ Full ownerData:", JSON.stringify(ownerData))
-    console.log("✅ ownerData.id:", ownerData.id)
-    console.log("✅ typeof ownerData.id:", typeof ownerData.id)
-    console.log("=================================")
-
+    console.log("✅ Login success — store_id:", ownerData.id)
     setOwner(ownerData)
     fetchOrders(ownerData.id)
   }
 
   function handleLogout() {
-    console.log("🚪 Logging out")
     try { localStorage.clear() } catch (e) {}
     setOwner(null)
     setOrders([])
@@ -32,11 +27,8 @@ function App() {
       setLoading(true)
       setError(null)
 
-      console.log("=================================")
       console.log("STORE ID:", storeId)
-      console.log("typeof storeId:", typeof storeId)
 
-      // ✅ Debug version — simplified query with Number() conversion
       const { data, error } = await supabase
         .from('orders')
         .select('*')
@@ -44,15 +36,12 @@ function App() {
 
       console.log("ORDERS RETURNED:", data)
       console.log("ERROR:", error)
-      console.log("=================================")
 
       if (error) {
-        console.error('❌ Error:', error.message)
         setError(error.message)
         return
       }
 
-      // ✅ Temporarily set raw data directly — no extra filtering
       setOrders(data || [])
 
     } catch (err) {
@@ -68,11 +57,7 @@ function App() {
       .update({ status: newStatus })
       .eq('id', orderId)
 
-    if (error) {
-      console.error('❌ Status update error:', error.message)
-      return
-    }
-
+    if (error) return
     fetchOrders(owner.id)
   }
 
@@ -94,6 +79,7 @@ function App() {
   return (
     <div style={styles.container}>
 
+      {/* ✅ Header */}
       <div style={styles.header}>
         <div>
           <h1 style={styles.title}>🛍️ StyleFlow Dashboard</h1>
@@ -117,98 +103,131 @@ function App() {
         </div>
       </div>
 
-      <div style={styles.statsBar}>
-        {[
-          { label: 'Total Orders',  value: orders.length,                                         color: '#333'    },
-          { label: '⏳ Pending',    value: orders.filter(o => o.status === 'pending').length,   color: '#FFA500' },
-          { label: '✅ Confirmed',  value: orders.filter(o => o.status === 'confirmed').length, color: '#2196F3' },
-          { label: '🚚 Shipped',    value: orders.filter(o => o.status === 'shipped').length,   color: '#9C27B0' },
-          { label: '📦 Delivered',  value: orders.filter(o => o.status === 'delivered').length, color: '#4CAF50' },
-        ].map((stat) => (
-          <div key={stat.label} style={styles.statCard}>
-            <span style={{ ...styles.statNumber, color: stat.color }}>{stat.value}</span>
-            <span style={styles.statLabel}>{stat.label}</span>
-          </div>
-        ))}
+      {/* ✅ Tab switcher */}
+      <div style={styles.tabBar}>
+        <button
+          style={{
+            ...styles.tabBtn,
+            backgroundColor: activeTab === 'orders' ? '#4CAF50' : '#f0f0f0',
+            color: activeTab === 'orders' ? '#fff' : '#333',
+          }}
+          onClick={() => setActiveTab('orders')}
+        >
+          📋 Orders
+        </button>
+        <button
+          style={{
+            ...styles.tabBtn,
+            backgroundColor: activeTab === 'products' ? '#4CAF50' : '#f0f0f0',
+            color: activeTab === 'products' ? '#fff' : '#333',
+          }}
+          onClick={() => setActiveTab('products')}
+        >
+          📦 Products
+        </button>
       </div>
 
-      {loading && (
-        <div style={styles.center}>
-          <p style={styles.loadingText}>⏳ Loading orders...</p>
-        </div>
-      )}
-
-      {error && (
-        <div style={styles.errorBox}>
-          <p>❌ Error: {error}</p>
-          <button
-            style={styles.retryBtn}
-            onClick={() => fetchOrders(owner.id)}
-          >
-            Retry
-          </button>
-        </div>
-      )}
-
-      {!loading && !error && orders.length === 0 && (
-        <div style={styles.center}>
-          <p style={styles.emptyText}>📭 No orders yet.</p>
-          <p style={styles.emptySubText}>
-            Orders for {owner.shop_name} will appear here.
-          </p>
-        </div>
-      )}
-
-      {!loading && !error && orders.length > 0 && (
-        <div style={styles.ordersList}>
-          {orders.map((order) => (
-            <div key={order.id} style={styles.orderCard}>
-
-              <div style={styles.orderHeader}>
-                <div>
-                  <p style={styles.orderId}>🆔 {String(order.id)} (store: {order.store_id})</p>
-                  <p style={styles.orderDate}>
-                    🕐 {new Date(order.created_at).toLocaleString()}
-                  </p>
-                </div>
-                <span style={{
-                  ...styles.statusBadge,
-                  backgroundColor: getStatusColor(order.status)
-                }}>
-                  {order.status.toUpperCase()}
-                </span>
+      {/* ✅ Orders Tab */}
+      {activeTab === 'orders' && (
+        <>
+          <div style={styles.statsBar}>
+            {[
+              { label: 'Total Orders',  value: orders.length,                                         color: '#333'    },
+              { label: '⏳ Pending',    value: orders.filter(o => o.status === 'pending').length,   color: '#FFA500' },
+              { label: '✅ Confirmed',  value: orders.filter(o => o.status === 'confirmed').length, color: '#2196F3' },
+              { label: '🚚 Shipped',    value: orders.filter(o => o.status === 'shipped').length,   color: '#9C27B0' },
+              { label: '📦 Delivered',  value: orders.filter(o => o.status === 'delivered').length, color: '#4CAF50' },
+            ].map((stat) => (
+              <div key={stat.label} style={styles.statCard}>
+                <span style={{ ...styles.statNumber, color: stat.color }}>{stat.value}</span>
+                <span style={styles.statLabel}>{stat.label}</span>
               </div>
+            ))}
+          </div>
 
-              <div style={styles.customerDetails}>
-                <p>👤 <strong>{order.customer_name || 'N/A'}</strong></p>
-                <p>📱 {order.phone_number}</p>
-                <p>📍 {order.customer_address || 'N/A'}</p>
-              </div>
-
-              <div style={styles.statusButtons}>
-                <p style={styles.updateLabel}>Update Status:</p>
-                <div style={styles.btnRow}>
-                  {['pending', 'confirmed', 'shipped', 'delivered', 'cancelled'].map((status) => (
-                    <button
-                      key={status}
-                      style={{
-                        ...styles.statusBtn,
-                        backgroundColor: order.status === status
-                          ? getStatusColor(status)
-                          : '#f0f0f0',
-                        color: order.status === status ? '#fff' : '#333',
-                      }}
-                      onClick={() => updateStatus(order.id, status)}
-                    >
-                      {status}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
+          {loading && (
+            <div style={styles.center}>
+              <p style={styles.loadingText}>⏳ Loading orders...</p>
             </div>
-          ))}
-        </div>
+          )}
+
+          {error && (
+            <div style={styles.errorBox}>
+              <p>❌ Error: {error}</p>
+              <button style={styles.retryBtn} onClick={() => fetchOrders(owner.id)}>
+                Retry
+              </button>
+            </div>
+          )}
+
+          {!loading && !error && orders.length === 0 && (
+            <div style={styles.center}>
+              <p style={styles.emptyText}>📭 No orders yet.</p>
+              <p style={styles.emptySubText}>
+                Orders for {owner.shop_name} will appear here.
+              </p>
+            </div>
+          )}
+
+          {!loading && !error && orders.length > 0 && (
+            <div style={styles.ordersList}>
+              {orders.map((order) => (
+                <div key={order.id} style={styles.orderCard}>
+
+                  <div style={styles.orderHeader}>
+                    <div>
+                      <p style={styles.orderId}>
+                        🆔 {String(order.id)} (store: {order.store_id})
+                      </p>
+                      <p style={styles.orderDate}>
+                        🕐 {new Date(order.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <span style={{
+                      ...styles.statusBadge,
+                      backgroundColor: getStatusColor(order.status)
+                    }}>
+                      {order.status.toUpperCase()}
+                    </span>
+                  </div>
+
+                  <div style={styles.customerDetails}>
+                    <p>👤 <strong>{order.customer_name || 'N/A'}</strong></p>
+                    <p>📱 {order.phone_number}</p>
+                    <p>📍 {order.customer_address || 'N/A'}</p>
+                  </div>
+
+                  <div style={styles.statusButtons}>
+                    <p style={styles.updateLabel}>Update Status:</p>
+                    <div style={styles.btnRow}>
+                      {['pending', 'confirmed', 'shipped', 'delivered', 'cancelled'].map((status) => (
+                        <button
+                          key={status}
+                          style={{
+                            ...styles.statusBtn,
+                            backgroundColor: order.status === status
+                              ? getStatusColor(status)
+                              : '#f0f0f0',
+                            color: order.status === status ? '#fff' : '#333',
+                          }}
+                          onClick={() => updateStatus(order.id, status)}
+                        >
+                          {status}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {/* ✅ Products Tab */}
+      {activeTab === 'products' && (
+        <Products owner={owner} />
       )}
 
     </div>
@@ -271,6 +290,19 @@ const styles = {
     borderRadius: '8px',
     cursor: 'pointer',
     fontSize: '14px',
+  },
+  tabBar: {
+    display: 'flex',
+    gap: '12px',
+    marginBottom: '20px',
+  },
+  tabBtn: {
+    padding: '10px 24px',
+    border: 'none',
+    borderRadius: '8px',
+    cursor: 'pointer',
+    fontSize: '14px',
+    fontWeight: 'bold',
   },
   statsBar: {
     display: 'flex',
