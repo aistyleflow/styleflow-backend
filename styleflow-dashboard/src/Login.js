@@ -7,46 +7,50 @@ function Login({ onLoginSuccess }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
 
+  
+
   async function handleLogin() {
-    try {
-      setLoading(true)
-      setError(null)
+  try {
+    setLoading(true)
+    setError(null)
 
-      console.log("Attempting login with:", phone, password)
+    const { data, error } = await supabase
+      .from('shop_owners')
+      .select('*')
+      .eq('phone_number', phone)
+      .eq('password', password)
+      .single()
 
-      // ✅ Fixed — phone_number instead of phone
-      const { data, error } = await supabase
-        .from('shop_owners')
-        .select('*')
-        .eq('phone_number', phone)
-        .eq('password', password)
-        .maybeSingle()
+    console.log("LOGIN DATA:", data)
+    console.log("LOGIN ERROR:", error)
 
-      console.log("DATA:", data)
-      console.log("ERROR:", error)
-
-      if (error) {
-        console.error('❌ Login error:', error.message)
-        setError('Something went wrong. Please try again.')
-        return
-      }
-
-      if (!data) {
-        console.log('❌ Invalid credentials — no matching row found')
-        setError('Invalid phone number or password.')
-        return
-      }
-
-      console.log('✅ Login successful:', data)
-      onLoginSuccess(data)
-
-    } catch (err) {
-      console.error('❌ Exception:', err.message)
-      setError(err.message)
-    } finally {
-      setLoading(false)
+    if (error || !data) {
+      setError("Invalid credentials")
+      return
     }
+
+    // ✅ STEP 1 FIX: ensure id exists
+    if (!data.id) {
+      console.error("❌ No ID in shop_owners table")
+      setError("Database issue: missing shop id")
+      return
+    }
+
+    // ✅ STEP 2 FIX: store correctly
+    localStorage.setItem('store_id', String(data.id))
+    localStorage.setItem('styleflow_owner', JSON.stringify(data))
+
+    console.log("✅ STORED STORE ID:", data.id)
+
+    onLoginSuccess(data)
+
+  } catch (err) {
+    console.error(err)
+    setError("Login failed")
+  } finally {
+    setLoading(false)
   }
+}
 
   return (
     <div style={styles.container}>

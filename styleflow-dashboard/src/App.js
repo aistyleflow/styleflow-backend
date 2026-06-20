@@ -1,69 +1,68 @@
-import { useEffect, useState } from 'react'
+console.log("SANJAY TEST 999")
+
+import { useState } from 'react'
 import { supabase } from './supabase.js'
 import Login from './Login.js'
 
 function App() {
   const [orders, setOrders] = useState([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
   const [owner, setOwner] = useState(null)
 
-  useEffect(() => {
-    const saved = localStorage.getItem('styleflow_owner')
-    if (saved) {
-      setOwner(JSON.parse(saved))
-    }
-  }, [])
-
-  useEffect(() => {
-  if (owner) {
-    fetchOrders()
-  }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-}, [owner])
-
   function handleLoginSuccess(ownerData) {
-    localStorage.setItem('styleflow_owner', JSON.stringify(ownerData))
+    console.log("=================================")
+    console.log("✅ handleLoginSuccess called")
+    console.log("✅ Full ownerData:", JSON.stringify(ownerData))
+    console.log("✅ ownerData.id:", ownerData.id)
+    console.log("✅ typeof ownerData.id:", typeof ownerData.id)
+    console.log("=================================")
+
     setOwner(ownerData)
+    fetchOrders(ownerData.id)
   }
 
   function handleLogout() {
-    localStorage.removeItem('styleflow_owner')
+    console.log("🚪 Logging out")
+    try { localStorage.clear() } catch (e) {}
     setOwner(null)
     setOrders([])
   }
 
- async function fetchOrders() {
-  try {
-    setLoading(true)
-    setError(null)
+  const fetchOrders = async (storeId) => {
+    try {
+      setLoading(true)
+      setError(null)
 
-    const { data, error } = await supabase
-      .from('orders')
-      .select(`
-        *,
-        order_items (
-          *
-        )
-      `)
-      .eq('store_id', owner.id) // ✅ fixed — store_id
-      .order('created_at', { ascending: false })
+      console.log("=================================")
+      console.log("STORE ID:", storeId)
+      console.log("typeof storeId:", typeof storeId)
 
-    if (error) {
-      console.error('❌ Error:', error.message)
-      setError(error.message)
-      return
+      // ✅ Debug version — simplified query with Number() conversion
+      const { data, error } = await supabase
+        .from('orders')
+        .select('*')
+        .eq('store_id', Number(storeId))
+
+      console.log("ORDERS RETURNED:", data)
+      console.log("ERROR:", error)
+      console.log("=================================")
+
+      if (error) {
+        console.error('❌ Error:', error.message)
+        setError(error.message)
+        return
+      }
+
+      // ✅ Temporarily set raw data directly — no extra filtering
+      setOrders(data || [])
+
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
     }
-
-    console.log('✅ Orders fetched:', data.length)
-    setOrders(data)
-
-  } catch (err) {
-    setError(err.message)
-  } finally {
-    setLoading(false)
   }
-}
 
   async function updateStatus(orderId, newStatus) {
     const { error } = await supabase
@@ -76,7 +75,7 @@ function App() {
       return
     }
 
-    fetchOrders()
+    fetchOrders(owner.id)
   }
 
   function getStatusColor(status) {
@@ -98,10 +97,20 @@ function App() {
     <div style={styles.container}>
 
       <div style={styles.header}>
-        <h1 style={styles.title}>🛍️ StyleFlow Dashboard</h1>
+        <div>
+          <h1 style={styles.title}>🛍️ StyleFlow Dashboard</h1>
+          <p style={styles.storeInfo}>
+            🏪 {owner.shop_name} — Store ID: {owner.id}
+          </p>
+        </div>
         <div style={styles.headerRight}>
-          <span style={styles.ownerName}>👤 {owner.name || owner.phone_number}</span>
-          <button style={styles.refreshBtn} onClick={fetchOrders}>
+          <span style={styles.ownerName}>
+            👤 {owner.owner_name || owner.phone_number}
+          </span>
+          <button
+            style={styles.refreshBtn}
+            onClick={() => fetchOrders(owner.id)}
+          >
             🔄 Refresh
           </button>
           <button style={styles.logoutBtn} onClick={handleLogout}>
@@ -134,7 +143,12 @@ function App() {
       {error && (
         <div style={styles.errorBox}>
           <p>❌ Error: {error}</p>
-          <button style={styles.retryBtn} onClick={fetchOrders}>Retry</button>
+          <button
+            style={styles.retryBtn}
+            onClick={() => fetchOrders(owner.id)}
+          >
+            Retry
+          </button>
         </div>
       )}
 
@@ -142,7 +156,7 @@ function App() {
         <div style={styles.center}>
           <p style={styles.emptyText}>📭 No orders yet.</p>
           <p style={styles.emptySubText}>
-            Orders will appear here when customers place them.
+            Orders for {owner.shop_name} will appear here.
           </p>
         </div>
       )}
@@ -154,9 +168,7 @@ function App() {
 
               <div style={styles.orderHeader}>
                 <div>
-                  <p style={styles.orderId}>
-                    🆔 {String(order.id).slice(0, 8)}...
-                  </p>
+                  <p style={styles.orderId}>🆔 {String(order.id)} (store: {order.store_id})</p>
                   <p style={styles.orderDate}>
                     🕐 {new Date(order.created_at).toLocaleString()}
                   </p>
@@ -174,18 +186,6 @@ function App() {
                 <p>📱 {order.phone_number}</p>
                 <p>📍 {order.customer_address || 'N/A'}</p>
               </div>
-
-              {order.order_items && order.order_items.length > 0 && (
-                <div style={styles.itemsBox}>
-                  <p style={styles.itemsTitle}>🛍️ Items Ordered:</p>
-                  {order.order_items.map((item, index) => (
-                    <div key={index} style={styles.itemRow}>
-                      <span>Product ID: {String(item.product_id).slice(0, 8)}...</span>
-                      <span style={styles.itemQty}>× {item.quantity}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
 
               <div style={styles.statusButtons}>
                 <p style={styles.updateLabel}>Update Status:</p>
@@ -245,6 +245,11 @@ const styles = {
     margin: 0,
     fontSize: '24px',
     color: '#333',
+  },
+  storeInfo: {
+    margin: '4px 0 0',
+    fontSize: '13px',
+    color: '#999',
   },
   ownerName: {
     fontSize: '14px',
@@ -334,29 +339,6 @@ const styles = {
     padding: '12px 0',
     marginBottom: '12px',
     lineHeight: '1.8',
-  },
-  itemsBox: {
-    backgroundColor: '#f9f9f9',
-    borderRadius: '8px',
-    padding: '12px',
-    marginBottom: '12px',
-  },
-  itemsTitle: {
-    margin: '0 0 8px',
-    fontWeight: 'bold',
-    fontSize: '14px',
-  },
-  itemRow: {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    padding: '6px 0',
-    fontSize: '14px',
-    borderBottom: '1px solid #eee',
-    gap: '8px',
-  },
-  itemQty: {
-    color: '#666',
   },
   statusButtons: {
     marginTop: '8px',
