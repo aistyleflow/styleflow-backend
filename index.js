@@ -19,9 +19,25 @@ const supabase = createClient(
 
 const GREETINGS = ["hi", "hello", "hey", "helo", "hii", "start", "namaste"];
 
-// ✅ Format date — Indian timezone
+// ✅ Fix date — handle both timestamp and epoch correctly
 function formatDate(dateString) {
-  const date = new Date(dateString);
+  if (!dateString) return 'N/A'
+
+  let date
+
+  // ✅ If it's a number (epoch in seconds or milliseconds)
+  if (typeof dateString === 'number') {
+    // If less than 10 digits it's in seconds, convert to ms
+    date = dateString < 1e10
+      ? new Date(dateString * 1000)
+      : new Date(dateString)
+  } else {
+    date = new Date(dateString)
+  }
+
+  // ✅ Check if date is valid
+  if (isNaN(date.getTime())) return 'N/A'
+
   return date.toLocaleString('en-IN', {
     day: 'numeric',
     month: 'short',
@@ -30,7 +46,7 @@ function formatDate(dateString) {
     minute: '2-digit',
     hour12: true,
     timeZone: 'Asia/Kolkata'
-  });
+  })
 }
 
 // ✅ Status emoji
@@ -45,28 +61,50 @@ function getStatusEmoji(status) {
   }
 }
 
-// ✅ Fetch order items with product names
+// ✅ Fixed — fetch order items with product names correctly
 async function getOrderItems(orderId) {
-  const { data: orderItems } = await supabase
-    .from('order_items')
-    .select('*, products(product_name, price)')
-    .eq('order_id', orderId)
+  try {
+    console.log("🔍 Fetching order items for order:", orderId)
 
-  if (!orderItems || orderItems.length === 0) return ''
+    const { data: orderItems, error } = await supabase
+      .from('order_items')
+      .select('quantity, product_id')
+      .eq('order_id', orderId)
 
-  let itemsText = ''
-  let total = 0
+    console.log("📦 Order items:", JSON.stringify(orderItems))
+    console.log("❗ Order items error:", error ? error.message : "none")
 
-  for (const item of orderItems) {
-    const name = item.products?.product_name || 'Unknown'
-    const price = item.products?.price || 0
-    const itemTotal = price * item.quantity
-    total += itemTotal
-    itemsText += `   • ${name} × ${item.quantity} = ₹${itemTotal}\n`
+    if (!orderItems || orderItems.length === 0) {
+      return '   No items found'
+    }
+
+    let itemsText = ''
+    let total = 0
+
+    for (const item of orderItems) {
+      // ✅ Fetch each product separately — more reliable than join
+      const { data: product } = await supabase
+        .from('products')
+        .select('product_name, price')
+        .eq('id', item.product_id)
+        .maybeSingle()
+
+      console.log(`📦 Product for item ${item.product_id}:`, product?.product_name)
+
+      if (product) {
+        const itemTotal = product.price * item.quantity
+        total += itemTotal
+        itemsText += `   • ${product.product_name} × ${item.quantity} = ₹${itemTotal}\n`
+      }
+    }
+
+    itemsText += `   💰 Total: ₹${total}`
+    return itemsText
+
+  } catch (err) {
+    console.error("❌ getOrderItems error:", err.message)
+    return '   Error fetching items'
   }
-
-  itemsText += `   💰 Total: ₹${total}`
-  return itemsText
 }
 
 app.get("/", (req, res) => {
@@ -120,8 +158,12 @@ async function sendProductMessage(twiml, product) {
     `📦 Stock: ${product.stock}\n` +
     `📐 Sizes: ${product.size || 'Free Size'}\n` +
     `🎨 Color: ${product.color}\n\n` +
-    `💬 Reply *ADD* to add to cart\n` +
-    `🛒 Reply *CART* to view your cart`
+    `─────────────────\n` +
+    `Reply with:\n` +
+    `1️⃣ *1* — Add to Cart\n` +
+    `2️⃣ *2* — View Cart\n` +
+    `3️⃣ *3* — Checkout\n` +
+    `🔍 Or type a keyword to search more`
   );
   if (product.image_url) {
     const accessible = await isImageAccessible(product.image_url);
@@ -211,6 +253,8 @@ app.post("/whatsapp", async (req, res) => {
       .maybeSingle();
 
     console.log("📋 checkout_step:", session?.checkout_step || "none");
+    console.log("📋 selected_product_id:", session?.selected_product_id || "none");
+    console.log("📋 action_step:", session?.action_step || "none");
 
     // ✅ 1. GREETING
     if (GREETINGS.includes(msgLower)) {
@@ -263,12 +307,14 @@ app.post("/whatsapp", async (req, res) => {
           phone_number: phone,
           customer_name: session.customer_name,
           customer_address: msg,
-          status: "pending"
+          status: "pending",
+          created_at: new Date().toISOString() // ✅ Fix date — store correct ISO string
         })
         .select()
         .single();
 
       if (orderError || !order) {
+        console.error("❌ Order error:", orderError?.message)
         twiml.message(`⚠️ Could not place order. Please try again!`);
         return sendTwiml(res, twiml);
       }
@@ -302,7 +348,7 @@ app.post("/whatsapp", async (req, res) => {
       await supabase.from("cart").delete().eq("phone_number", phone);
       await supabase
         .from("user_sessions")
-        .update({ checkout_step: null, customer_address: msg })
+        .update({ checkout_step: null, customer_address: msg, action_step: null })
         .eq("phone_number", phone);
 
       twiml.message(
@@ -312,7 +358,7 @@ app.post("/whatsapp", async (req, res) => {
         `👤 Name: ${session.customer_name}\n` +
         `📍 Address: ${msg}\n\n` +
         `🆔 Order ID: ${order.id}\n` +
-        `🕐 ${formatDate(order.created_at)}\n\n` +
+        `🕐 ${formatDate(new Date().toISOString())}\n\n` +
         `📦 Type *ORDER STATUS* to track your order\n\n` +
         `Thank you for shopping with *StyleFlow*! 🎉`
       );
@@ -368,8 +414,9 @@ app.post("/whatsapp", async (req, res) => {
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
           `🔢 Quantity: ${existingCart.quantity + 1}\n\n` +
-          `🛒 Type *CART* to view\n` +
-          `✅ Type *CHECKOUT* to order`
+          `Reply:\n` +
+          `2️⃣ *2* — View Cart\n` +
+          `3️⃣ *3* — Checkout`
         );
       } else {
         await supabase.from("cart").insert({
@@ -384,8 +431,9 @@ app.post("/whatsapp", async (req, res) => {
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n\n` +
-          `🛒 Type *CART* to view\n` +
-          `✅ Type *CHECKOUT* to order`
+          `Reply:\n` +
+          `2️⃣ *2* — View Cart\n` +
+          `3️⃣ *3* — Checkout`
         );
       }
 
@@ -423,8 +471,6 @@ app.post("/whatsapp", async (req, res) => {
 
       const order = orders[0]
       const emoji = getStatusEmoji(order.status)
-
-      // ✅ Fetch product names for this order
       const itemsText = await getOrderItems(order.id)
 
       twiml.message(
@@ -440,7 +486,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 6. ORDER HISTORY — all orders with full details + product names
+    // ✅ 6. ORDER HISTORY — all orders with full details
     if (
       msgUpper === "ORDER HISTORY" ||
       msgUpper === "MY ORDERS" ||
@@ -467,7 +513,7 @@ app.post("/whatsapp", async (req, res) => {
 
       for (const order of orders) {
         const emoji = getStatusEmoji(order.status)
-        const itemsText = await getOrderItems(order.id) // ✅ product names per order
+        const itemsText = await getOrderItems(order.id)
 
         reply += `🆔 Order #${order.id}\n`
         reply += `${emoji} Status: *${order.status.toUpperCase()}*\n`
@@ -479,18 +525,161 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       reply += `\n📦 Type *ORDER STATUS* to check latest order`
-
       twiml.message(reply);
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 7. CHECKOUT COMMAND
+    // ✅ 7. ACTION STEP — handle 1, 2, 3 options after product view
+    // This is checked BEFORE the general number check
+    if (session?.action_step === "product_action") {
+      if (msg === "1") {
+        // ✅ Add to Cart
+        if (!session?.selected_product_id) {
+          twiml.message(`⚠️ Please search and select a product first!`);
+          return sendTwiml(res, twiml);
+        }
+
+        const { data: product } = await supabase
+          .from("products").select("*")
+          .eq("id", session.selected_product_id).maybeSingle();
+
+        if (!product) {
+          twiml.message(`⚠️ Product not found. Please search again!`);
+          return sendTwiml(res, twiml);
+        }
+
+        if (product.size && product.size.trim() !== '') {
+          await supabase
+            .from("user_sessions")
+            .update({ checkout_step: "size", action_step: null })
+            .eq("phone_number", phone);
+
+          twiml.message(
+            `📐 *Select Size*\n\n` +
+            `Product: *${product.product_name}*\n\n` +
+            `Available sizes:\n` +
+            product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
+            `\n\nType your size (e.g. *M* or *XL*)`
+          );
+          return sendTwiml(res, twiml);
+        } else {
+          const { data: existingCart } = await supabase
+            .from("cart").select("*")
+            .eq("phone_number", phone)
+            .eq("product_id", session.selected_product_id)
+            .maybeSingle();
+
+          if (existingCart) {
+            await supabase
+              .from("cart")
+              .update({ quantity: existingCart.quantity + 1 })
+              .eq("id", existingCart.id);
+          } else {
+            await supabase.from("cart").insert({
+              phone_number: phone,
+              product_id: session.selected_product_id,
+              quantity: 1,
+              size: 'Free Size'
+            });
+          }
+
+          await supabase
+            .from("user_sessions")
+            .update({ action_step: null })
+            .eq("phone_number", phone);
+
+          twiml.message(
+            `✅ *Added to Cart!*\n\n` +
+            `📦 ${product.product_name}\n` +
+            `💰 ₹${product.price}\n\n` +
+            `Reply:\n` +
+            `2️⃣ *2* — View Cart\n` +
+            `3️⃣ *3* — Checkout`
+          );
+          return sendTwiml(res, twiml);
+        }
+      }
+
+      if (msg === "2") {
+        // ✅ View Cart
+        await supabase
+          .from("user_sessions")
+          .update({ action_step: null })
+          .eq("phone_number", phone);
+
+        const { data: cartItems } = await supabase
+          .from("cart").select("*").eq("phone_number", phone);
+
+        if (!cartItems || cartItems.length === 0) {
+          twiml.message(`🛒 Your cart is empty.\n\nSearch for products to add!`);
+          return sendTwiml(res, twiml);
+        }
+
+        let reply = `🛒 *Your Cart*\n\n`;
+        let total = 0;
+        let itemCount = 0;
+
+        for (let i = 0; i < cartItems.length; i++) {
+          const { data: product } = await supabase
+            .from("products").select("*")
+            .eq("id", cartItems[i].product_id).maybeSingle();
+
+          if (product) {
+            const itemTotal = product.price * cartItems[i].quantity;
+            total += itemTotal;
+            itemCount++;
+            reply += `${i + 1}. *${product.product_name}*\n`;
+            reply += `   📐 Size: ${cartItems[i].size || 'Free Size'}\n`;
+            reply += `   💰 ₹${product.price} × ${cartItems[i].quantity} = ₹${itemTotal}\n\n`;
+          }
+        }
+
+        reply += `─────────────────\n`;
+        reply += `🧾 *Total: ₹${total}*\n`;
+        reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart\n\n`;
+        reply += `Reply *3* to Checkout\n`;
+        reply += `🔍 Or search for more products!`;
+
+        twiml.message(reply);
+        return sendTwiml(res, twiml);
+      }
+
+      if (msg === "3") {
+        // ✅ Checkout
+        await supabase
+          .from("user_sessions")
+          .update({ action_step: null })
+          .eq("phone_number", phone);
+
+        const { data: cartCheck } = await supabase
+          .from("cart").select("*").eq("phone_number", phone);
+
+        if (!cartCheck || cartCheck.length === 0) {
+          twiml.message(`⚠️ Your cart is empty!\n\nSearch for products and add them first.`);
+          return sendTwiml(res, twiml);
+        }
+
+        await supabase
+          .from("user_sessions")
+          .update({ checkout_step: "name" })
+          .eq("phone_number", phone);
+
+        twiml.message(
+          `🛍️ *Checkout*\n\n` +
+          `${cartCheck.length} item${cartCheck.length > 1 ? "s" : ""} in your cart.\n\n` +
+          `👤 Please enter your *full name*:`
+        );
+        return sendTwiml(res, twiml);
+      }
+    }
+
+    // ✅ 8. CHECKOUT COMMAND (still works if typed)
     if (msgUpper === "CHECKOUT") {
       const { data: cartCheck } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
 
       if (!cartCheck || cartCheck.length === 0) {
-        twiml.message(`⚠️ Your cart is empty!\n\nSearch for products and type *ADD* first.`);
+        twiml.message(`⚠️ Your cart is empty!\n\nSearch for products and add them first.`);
         return sendTwiml(res, twiml);
       }
 
@@ -507,15 +696,10 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 8. ADD COMMAND
+    // ✅ 9. ADD COMMAND (still works if typed)
     if (msgUpper === "ADD") {
-      console.log("🛒 ADD command");
-
       if (!session?.selected_product_id) {
-        twiml.message(
-          `⚠️ Please select a product first.\n\n` +
-          `Search for a product, select a number, then type *ADD*`
-        );
+        twiml.message(`⚠️ Please select a product first!`);
         return sendTwiml(res, twiml);
       }
 
@@ -524,7 +708,7 @@ app.post("/whatsapp", async (req, res) => {
         .eq("id", session.selected_product_id).maybeSingle();
 
       if (!product) {
-        twiml.message(`⚠️ Product not found. Please search and select again!`);
+        twiml.message(`⚠️ Product not found. Please search again!`);
         return sendTwiml(res, twiml);
       }
 
@@ -542,58 +726,46 @@ app.post("/whatsapp", async (req, res) => {
           `\n\nType your size (e.g. *M* or *XL*)`
         );
         return sendTwiml(res, twiml);
-
-      } else {
-        const { data: existingCart } = await supabase
-          .from("cart").select("*")
-          .eq("phone_number", phone)
-          .eq("product_id", session.selected_product_id)
-          .maybeSingle();
-
-        if (existingCart) {
-          await supabase
-            .from("cart")
-            .update({ quantity: existingCart.quantity + 1 })
-            .eq("id", existingCart.id);
-
-          twiml.message(
-            `✅ *Cart Updated!*\n\n` +
-            `📦 ${product.product_name}\n` +
-            `💰 ₹${product.price}\n` +
-            `🔢 Quantity: ${existingCart.quantity + 1}\n\n` +
-            `🛒 Type *CART* to view\n` +
-            `✅ Type *CHECKOUT* to order`
-          );
-        } else {
-          await supabase.from("cart").insert({
-            phone_number: phone,
-            product_id: session.selected_product_id,
-            quantity: 1,
-            size: 'Free Size'
-          });
-
-          twiml.message(
-            `✅ *Added to Cart!*\n\n` +
-            `📦 ${product.product_name}\n` +
-            `💰 ₹${product.price}\n\n` +
-            `🛒 Type *CART* to view\n` +
-            `✅ Type *CHECKOUT* to order`
-          );
-        }
-        return sendTwiml(res, twiml);
       }
+
+      const { data: existingCart } = await supabase
+        .from("cart").select("*")
+        .eq("phone_number", phone)
+        .eq("product_id", session.selected_product_id)
+        .maybeSingle();
+
+      if (existingCart) {
+        await supabase
+          .from("cart")
+          .update({ quantity: existingCart.quantity + 1 })
+          .eq("id", existingCart.id);
+      } else {
+        await supabase.from("cart").insert({
+          phone_number: phone,
+          product_id: session.selected_product_id,
+          quantity: 1,
+          size: 'Free Size'
+        });
+      }
+
+      twiml.message(
+        `✅ *Added to Cart!*\n\n` +
+        `📦 ${product.product_name}\n` +
+        `💰 ₹${product.price}\n\n` +
+        `Reply:\n` +
+        `2️⃣ *2* — View Cart\n` +
+        `3️⃣ *3* — Checkout`
+      );
+      return sendTwiml(res, twiml);
     }
 
-    // ✅ 9. CART COMMAND
+    // ✅ 10. CART COMMAND (still works if typed)
     if (msgUpper === "CART") {
       const { data: cartItems } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
 
       if (!cartItems || cartItems.length === 0) {
-        twiml.message(
-          `🛒 Your cart is empty.\n\n` +
-          `Search for products!\nExample: Type *Black* or *Jeans*`
-        );
+        twiml.message(`🛒 Your cart is empty.\n\nSearch for products!`);
         return sendTwiml(res, twiml);
       }
 
@@ -612,25 +784,25 @@ app.post("/whatsapp", async (req, res) => {
           itemCount++;
           reply += `${i + 1}. *${product.product_name}*\n`;
           reply += `   📐 Size: ${cartItems[i].size || 'Free Size'}\n`;
-          reply += `   💰 ₹${product.price} × ${cartItems[i].quantity} = ₹${itemTotal}\n`;
-          reply += `   🎨 Color: ${product.color}\n\n`;
+          reply += `   💰 ₹${product.price} × ${cartItems[i].quantity} = ₹${itemTotal}\n\n`;
         }
       }
 
       reply += `─────────────────\n`;
       reply += `🧾 *Total: ₹${total}*\n`;
       reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart\n\n`;
-      reply += `✅ Type *CHECKOUT* to place order\n`;
+      reply += `Reply *3* to Checkout\n`;
       reply += `🔍 Or search for more products!`;
 
       twiml.message(reply);
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 10. NUMBER CHECK
+    // ✅ 11. NUMBER CHECK — for product list selection
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
+      console.log(`🔢 Number: ${msg}`);
       const index = parseInt(msg) - 1;
 
       if (!session || !session.last_results) {
@@ -655,11 +827,18 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       await saveSelectedProduct(phone, freshProduct.id);
+
+      // ✅ Set action_step so next 1/2/3 is treated as action
+      await supabase
+        .from("user_sessions")
+        .update({ action_step: "product_action" })
+        .eq("phone_number", phone);
+
       await sendProductMessage(twiml, freshProduct);
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 11. SEARCH LAST
+    // ✅ 12. SEARCH LAST
     console.log(`🔍 Searching: "${msg}"`);
 
     const { data, error } = await supabase
@@ -669,8 +848,18 @@ app.post("/whatsapp", async (req, res) => {
     if (data && data.length > 0) {
       await saveSession(phone, data);
 
+      // ✅ Reset action_step on new search
+      await supabase
+        .from("user_sessions")
+        .update({ action_step: null })
+        .eq("phone_number", phone);
+
       if (data.length === 1) {
         await saveSelectedProduct(phone, data[0].id);
+        await supabase
+          .from("user_sessions")
+          .update({ action_step: "product_action" })
+          .eq("phone_number", phone);
         await sendProductMessage(twiml, data[0]);
       } else {
         let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
@@ -682,7 +871,7 @@ app.post("/whatsapp", async (req, res) => {
           response += `   🎨 Color: ${product.color}\n`;
           response += product.image_url ? `   🖼️ Image available\n\n` : `\n`;
         });
-        response += `_Reply with a number to see details + image!_`;
+        response += `_Reply with a number to see details + options!_`;
         twiml.message(response);
       }
     } else {
