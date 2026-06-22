@@ -255,7 +255,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 3. CHECKOUT STEP — ADDRESS (with store_order_number fix)
+    // ✅ 3. CHECKOUT STEP — ADDRESS
     if (session?.checkout_step === "address") {
       const { data: cartItems } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
@@ -466,7 +466,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 6. ORDER HISTORY
+    // ✅ 6. ORDER HISTORY — single message
     if (
       msgUpper === "ORDER HISTORY" ||
       msgUpper === "MY ORDERS" ||
@@ -483,52 +483,28 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Send first order via TwiML
-      const firstOrder = orders[0]
-      const firstEmoji = getStatusEmoji(firstOrder.status)
-      const firstItems = await getOrderItems(firstOrder.id)
-
-      twiml.message(
+      // ✅ Build ALL orders into ONE single message
+      let fullMessage =
         `📋 *Your Order History*\n` +
-        `(${orders.length} order${orders.length > 1 ? 's' : ''})\n\n` +
-        `🆔 Order #${firstOrder.store_order_number || firstOrder.id}\n` +
-        `${firstEmoji} *${firstOrder.status.toUpperCase()}*\n` +
-        `🕐 ${formatDate(firstOrder.created_at)}\n\n` +
-        `🛍️ *Items:*\n${firstItems}\n\n` +
-        `👤 ${firstOrder.customer_name || 'N/A'}\n` +
-        `📍 ${firstOrder.customer_address || 'N/A'}\n` +
-        `─────────────────`
-      );
+        `(${orders.length} order${orders.length > 1 ? 's' : ''})\n\n`
 
-      sendTwiml(res, twiml);
-
-      // ✅ Send remaining orders via REST API
-      for (let i = 1; i < orders.length; i++) {
+      for (let i = 0; i < orders.length; i++) {
         const order = orders[i]
         const emoji = getStatusEmoji(order.status)
         const itemsText = await getOrderItems(order.id)
 
-        await sendWhatsAppMessage(
-          phone,
+        fullMessage +=
           `🆔 Order #${order.store_order_number || order.id}\n` +
           `${emoji} *${order.status.toUpperCase()}*\n` +
           `🕐 ${formatDate(order.created_at)}\n\n` +
           `🛍️ *Items:*\n${itemsText}\n\n` +
           `👤 ${order.customer_name || 'N/A'}\n` +
           `📍 ${order.customer_address || 'N/A'}\n` +
-          `─────────────────`
-        );
+          `─────────────────\n\n`
       }
 
-      if (orders.length > 1) {
-        await sendWhatsAppMessage(
-          phone,
-          `📦 Type *ORDER STATUS* to check latest order\n` +
-          `🛍️ Search products to continue shopping!`
-        );
-      }
-
-      return;
+      twiml.message(fullMessage.trim())
+      return sendTwiml(res, twiml);
     }
 
     // ✅ 7. ACTION STEP — 1, 2, 3
@@ -786,7 +762,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 11. NUMBER CHECK
+    // ✅ 11. NUMBER CHECK — product selection from list
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber && session?.action_step !== "product_action") {
