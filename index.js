@@ -515,7 +515,153 @@ app.post("/whatsapp", async (req, res) => {
       return;
     }
 
-    // ✅ 7. ACTION STEP — only ADD, CART, CHECKOUT (no 1/2/3)
+    // ✅ 7. ADD — FIXED: moved before action_step block
+    if (msgUpper === "ADD") {
+      console.log("➕ ADD command for:", phone);
+
+      if (!session?.selected_product_id) {
+        twiml.message(`⚠️ Please select a product first by searching!`);
+        return sendTwiml(res, twiml);
+      }
+
+      const { data: product } = await supabase
+        .from("products").select("*")
+        .eq("id", session.selected_product_id).maybeSingle();
+
+      if (!product) {
+        twiml.message(`⚠️ Product not found. Please search again!`);
+        return sendTwiml(res, twiml);
+      }
+
+      if (product.size && product.size.trim() !== '') {
+        await supabase
+          .from("user_sessions")
+          .update({ checkout_step: "size", action_step: null })
+          .eq("phone_number", phone);
+
+        twiml.message(
+          `📐 *Select Size*\n\n` +
+          `Product: *${product.product_name}*\n\n` +
+          `Available sizes:\n` +
+          product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
+          `\n\nType your size (e.g. *M* or *XL*)`
+        );
+        return sendTwiml(res, twiml);
+      }
+
+      const { data: existingCart } = await supabase
+        .from("cart").select("*")
+        .eq("phone_number", phone)
+        .eq("product_id", session.selected_product_id)
+        .maybeSingle();
+
+      if (existingCart) {
+        await supabase
+          .from("cart")
+          .update({ quantity: existingCart.quantity + 1 })
+          .eq("id", existingCart.id);
+      } else {
+        await supabase.from("cart").insert({
+          phone_number: phone,
+          product_id: session.selected_product_id,
+          quantity: 1,
+          size: 'Free Size'
+        });
+      }
+
+      // ✅ Always set action_step after ADD
+      await supabase
+        .from("user_sessions")
+        .update({ action_step: "product_action" })
+        .eq("phone_number", phone);
+
+      twiml.message(
+        `✅ *Added to Cart!*\n\n` +
+        `📦 ${product.product_name}\n` +
+        `💰 ₹${product.price}\n\n` +
+        `Type *CART* to View Cart\n` +
+        `Type *CHECKOUT* to Checkout`
+      );
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ 8. CART — FIXED: moved before action_step block
+    if (msgUpper === "CART") {
+      console.log("🛒 CART command for:", phone);
+
+      const { data: cartItems } = await supabase
+        .from("cart").select("*").eq("phone_number", phone);
+
+      console.log("🛒 Cart items found:", cartItems?.length || 0);
+
+      if (!cartItems || cartItems.length === 0) {
+        twiml.message(
+          `🛒 Your cart is empty.\n\n` +
+          `Search for products and type *ADD* to add them!`
+        );
+        return sendTwiml(res, twiml);
+      }
+
+      let reply = `🛒 *Your Cart*\n\n`;
+      let total = 0;
+      let itemCount = 0;
+
+      for (let i = 0; i < cartItems.length; i++) {
+        const { data: product } = await supabase
+          .from("products").select("*")
+          .eq("id", cartItems[i].product_id).maybeSingle();
+
+        if (product) {
+          const itemTotal = product.price * cartItems[i].quantity;
+          total += itemTotal;
+          itemCount++;
+          reply += `${itemCount}. *${product.product_name}*\n`;
+          reply += `   📐 Size: ${cartItems[i].size || 'Free Size'}\n`;
+          reply += `   💰 ₹${product.price} × ${cartItems[i].quantity} = ₹${itemTotal}\n\n`;
+        }
+      }
+
+      reply += `─────────────────\n`;
+      reply += `🧾 *Total: ₹${total}*\n`;
+      reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart\n\n`;
+      reply += `Type *CHECKOUT* to place your order\n`;
+      reply += `🔍 Or search for more products!`;
+
+      twiml.message(reply);
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ 9. CHECKOUT — FIXED: moved before action_step block
+    if (msgUpper === "CHECKOUT") {
+      console.log("✅ CHECKOUT command for:", phone);
+
+      const { data: cartCheck } = await supabase
+        .from("cart").select("*").eq("phone_number", phone);
+
+      console.log("✅ Cart items for checkout:", cartCheck?.length || 0);
+
+      if (!cartCheck || cartCheck.length === 0) {
+        twiml.message(
+          `⚠️ Your cart is empty!\n\n` +
+          `Search for products and type *ADD* to add them first.`
+        );
+        return sendTwiml(res, twiml);
+      }
+
+      await supabase
+        .from("user_sessions")
+        .update({ checkout_step: "name", action_step: null })
+        .eq("phone_number", phone);
+
+      twiml.message(
+        `🛍️ *Checkout*\n\n` +
+        `${cartCheck.length} item${cartCheck.length > 1 ? "s" : ""} in your cart.\n\n` +
+        `👤 Please enter your *full name*:`
+      );
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ 10. ACTION STEP — kept exactly as your original
     if (session?.action_step === "product_action") {
       console.log("🎯 Action step — msg:", msg);
 
@@ -555,7 +701,6 @@ app.post("/whatsapp", async (req, res) => {
           return sendTwiml(res, twiml);
         }
 
-        // ✅ No size — add directly
         const { data: existingCart } = await supabase
           .from("cart").select("*")
           .eq("phone_number", phone)
@@ -662,127 +807,6 @@ app.post("/whatsapp", async (req, res) => {
         );
         return sendTwiml(res, twiml);
       }
-    }
-
-    // ✅ 8. CHECKOUT command (typed anywhere)
-    if (msgUpper === "CHECKOUT") {
-      const { data: cartCheck } = await supabase
-        .from("cart").select("*").eq("phone_number", phone);
-
-      if (!cartCheck || cartCheck.length === 0) {
-        twiml.message(`⚠️ Your cart is empty!`);
-        return sendTwiml(res, twiml);
-      }
-
-      await supabase
-        .from("user_sessions")
-        .update({ checkout_step: "name" })
-        .eq("phone_number", phone);
-
-      twiml.message(
-        `🛍️ *Checkout*\n\n` +
-        `👤 Please enter your *full name*:`
-      );
-      return sendTwiml(res, twiml);
-    }
-
-    // ✅ 9. ADD command (typed anywhere)
-    if (msgUpper === "ADD") {
-      if (!session?.selected_product_id) {
-        twiml.message(`⚠️ Please select a product first!`);
-        return sendTwiml(res, twiml);
-      }
-
-      const { data: product } = await supabase
-        .from("products").select("*")
-        .eq("id", session.selected_product_id).maybeSingle();
-
-      if (!product) {
-        twiml.message(`⚠️ Product not found!`);
-        return sendTwiml(res, twiml);
-      }
-
-      if (product.size && product.size.trim() !== '') {
-        await supabase
-          .from("user_sessions")
-          .update({ checkout_step: "size" })
-          .eq("phone_number", phone);
-
-        twiml.message(
-          `📐 *Select Size*\n\n` +
-          `Product: *${product.product_name}*\n\n` +
-          `Available sizes:\n` +
-          product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
-          `\n\nType your size`
-        );
-        return sendTwiml(res, twiml);
-      }
-
-      const { data: existingCart } = await supabase
-        .from("cart").select("*")
-        .eq("phone_number", phone)
-        .eq("product_id", session.selected_product_id)
-        .maybeSingle();
-
-      if (existingCart) {
-        await supabase
-          .from("cart")
-          .update({ quantity: existingCart.quantity + 1 })
-          .eq("id", existingCart.id);
-      } else {
-        await supabase.from("cart").insert({
-          phone_number: phone,
-          product_id: session.selected_product_id,
-          quantity: 1,
-          size: 'Free Size'
-        });
-      }
-
-      twiml.message(
-        `✅ *Added to Cart!*\n\n` +
-        `📦 ${product.product_name}\n` +
-        `💰 ₹${product.price}\n\n` +
-        `Type *CART* to View Cart\n` +
-        `Type *CHECKOUT* to Checkout`
-      );
-      return sendTwiml(res, twiml);
-    }
-
-    // ✅ 10. CART command (typed anywhere)
-    if (msgUpper === "CART") {
-      const { data: cartItems } = await supabase
-        .from("cart").select("*").eq("phone_number", phone);
-
-      if (!cartItems || cartItems.length === 0) {
-        twiml.message(`🛒 Your cart is empty.\n\nSearch for products!`);
-        return sendTwiml(res, twiml);
-      }
-
-      let reply = `🛒 *Your Cart*\n\n`;
-      let total = 0;
-      let itemCount = 0;
-
-      for (let i = 0; i < cartItems.length; i++) {
-        const { data: product } = await supabase
-          .from("products").select("*")
-          .eq("id", cartItems[i].product_id).maybeSingle();
-
-        if (product) {
-          const itemTotal = product.price * cartItems[i].quantity;
-          total += itemTotal;
-          itemCount++;
-          reply += `${itemCount}. *${product.product_name}*\n`;
-          reply += `   📐 Size: ${cartItems[i].size || 'Free Size'}\n`;
-          reply += `   💰 ₹${product.price} × ${cartItems[i].quantity} = ₹${itemTotal}\n\n`;
-        }
-      }
-
-      reply += `─────────────────\n`;
-      reply += `🧾 *Total: ₹${total}*\n\n`;
-      reply += `Type *CHECKOUT* to place order`;
-
-      twiml.message(reply);
-      return sendTwiml(res, twiml);
     }
 
     // ✅ 11. NUMBER CHECK — product selection from list only
