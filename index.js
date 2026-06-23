@@ -453,7 +453,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 6. ORDER HISTORY — all orders in ONE message
+    // ✅ 6. ORDER HISTORY — fixed: send via REST API separately
     if (
       msgUpper === "ORDER HISTORY" ||
       msgUpper === "MY ORDERS" ||
@@ -476,26 +476,43 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Build all orders into ONE single message
-      let fullMessage = `📋 *Your Order History*\n(${orders.length} order${orders.length > 1 ? 's' : ''})\n\n`
+      // ✅ Respond to Twilio immediately
+      res.status(200).end();
 
+      // ✅ Send header
+      await sendWhatsAppMessage(
+        phone,
+        `📋 *Your Order History*\n` +
+        `(${orders.length} order${orders.length > 1 ? 's' : ''})\n\n` +
+        `─────────────────`
+      );
+
+      // ✅ Send each order as separate message
       for (let i = 0; i < orders.length; i++) {
         const order = orders[i]
         const emoji = getStatusEmoji(order.status)
         const itemsText = await getOrderItems(order.id)
 
-        fullMessage +=
+        await sendWhatsAppMessage(
+          phone,
           `🆔 Order #${order.id}\n` +
           `${emoji} *${order.status.toUpperCase()}*\n` +
           `🕐 ${formatDate(order.created_at)}\n\n` +
           `🛍️ *Items:*\n${itemsText}\n\n` +
           `👤 ${order.customer_name || 'N/A'}\n` +
           `📍 ${order.customer_address || 'N/A'}\n` +
-          `─────────────────\n\n`
+          `─────────────────`
+        );
       }
 
-      twiml.message(fullMessage.trim())
-      return sendTwiml(res, twiml);
+      // ✅ Send footer
+      await sendWhatsAppMessage(
+        phone,
+        `📦 Type *ORDER STATUS* to check latest order\n` +
+        `🛍️ Search products to continue shopping!`
+      );
+
+      return;
     }
 
     // ✅ 7. ACTION STEP — only ADD, CART, CHECKOUT (no 1/2/3)
