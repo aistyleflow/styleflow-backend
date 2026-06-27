@@ -257,8 +257,16 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 3. CHECKOUT STEP — ADDRESS
-    if (session?.checkout_step === "address") {
+    // ✅ 2b. CHECKOUT STEP — PINCODE ✅ NEW
+    if (session?.checkout_step === "pincode") {
+      const pincode = msg.trim()
+      if (!/^\d{6}$/.test(pincode)) {
+        twiml.message(`⚠️ Please enter a valid *6-digit pincode*.\n\nExample: *600001*`);
+        return sendTwiml(res, twiml);
+      }
+
+      const fullAddress = `${session.customer_address}, ${pincode}`
+
       const { data: cartItems } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
 
@@ -276,7 +284,7 @@ app.post("/whatsapp", async (req, res) => {
         .insert({
           phone_number: phone,
           customer_name: session.customer_name,
-          customer_address: msg,
+          customer_address: fullAddress,
           status: "pending",
           created_at: new Date().toISOString()
         })
@@ -284,6 +292,7 @@ app.post("/whatsapp", async (req, res) => {
         .single();
 
       if (orderError || !order) {
+        console.error("❌ Order error:", orderError?.message);
         twiml.message(`⚠️ Could not place order. Please try again!`);
         return sendTwiml(res, twiml);
       }
@@ -326,7 +335,7 @@ app.post("/whatsapp", async (req, res) => {
         `🧾 *Order Summary:*\n${orderSummary}\n` +
         `💰 *Total: ₹${orderTotal}*\n\n` +
         `👤 Name: ${session.customer_name}\n` +
-        `📍 Address: ${msg}\n\n` +
+        `📍 Address: ${fullAddress}\n\n` +
         `🆔 Order ID: ${order.id}\n` +
         `🕐 ${formatDate(new Date().toISOString())}\n\n` +
         `📦 Type *ORDER STATUS* to track your order\n\n` +
@@ -335,7 +344,18 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 4. SIZE STEP
+    // ✅ 3. CHECKOUT STEP — ADDRESS ✅ now asks pincode next
+    if (session?.checkout_step === "address") {
+      await supabase
+        .from("user_sessions")
+        .update({ customer_address: msg, checkout_step: "pincode" })
+        .eq("phone_number", phone);
+
+      twiml.message(`✅ Address saved!\n\n📮 Please enter your *6-digit Pincode*:`);
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ 4. SIZE STEP — ✅ FIXED cart insert with error logging
     if (session?.checkout_step === "size") {
       const { data: product } = await supabase
         .from("products").select("*")
@@ -372,10 +392,16 @@ app.post("/whatsapp", async (req, res) => {
         .maybeSingle();
 
       if (existingCart) {
-        await supabase
+        const { error: updateError } = await supabase
           .from("cart")
           .update({ quantity: existingCart.quantity + 1, size: finalSize })
           .eq("id", existingCart.id);
+
+        if (updateError) {
+          console.error("❌ Cart update error:", updateError.message);
+          twiml.message(`⚠️ Could not update cart. Please try again!`);
+          return sendTwiml(res, twiml);
+        }
 
         twiml.message(
           `✅ *Cart Updated!*\n\n` +
@@ -387,12 +413,21 @@ app.post("/whatsapp", async (req, res) => {
           `Type *CHECKOUT* to Checkout`
         );
       } else {
-        await supabase.from("cart").insert({
+        // ✅ FIXED — added error check to catch silent failures
+        const { error: insertError } = await supabase.from("cart").insert({
           phone_number: phone,
           product_id: session.selected_product_id,
           quantity: 1,
           size: finalSize
         });
+
+        if (insertError) {
+          console.error("❌ Cart insert error:", insertError.message);
+          twiml.message(`⚠️ Could not add to cart. Please try again!`);
+          return sendTwiml(res, twiml);
+        }
+
+        console.log("✅ Cart insert success — phone:", phone, "product:", session.selected_product_id, "size:", finalSize);
 
         twiml.message(
           `✅ *Added to Cart!*\n\n` +
@@ -476,10 +511,8 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Respond to Twilio immediately
       res.status(200).end();
 
-      // ✅ Send header
       await sendWhatsAppMessage(
         phone,
         `📋 *Your Order History*\n` +
@@ -487,7 +520,6 @@ app.post("/whatsapp", async (req, res) => {
         `─────────────────`
       );
 
-      // ✅ Send each order as separate message
       for (let i = 0; i < orders.length; i++) {
         const order = orders[i]
         const emoji = getStatusEmoji(order.status)
@@ -505,7 +537,6 @@ app.post("/whatsapp", async (req, res) => {
         );
       }
 
-      // ✅ Send footer
       await sendWhatsAppMessage(
         phone,
         `📦 Type *ORDER STATUS* to check latest order\n` +
@@ -515,7 +546,7 @@ app.post("/whatsapp", async (req, res) => {
       return;
     }
 
-    // ✅ 7. ADD — FIXED: moved before action_step block
+    // ✅ 7. ADD — top level
     if (msgUpper === "ADD") {
       console.log("➕ ADD command for:", phone);
 
@@ -561,15 +592,20 @@ app.post("/whatsapp", async (req, res) => {
           .update({ quantity: existingCart.quantity + 1 })
           .eq("id", existingCart.id);
       } else {
-        await supabase.from("cart").insert({
+        const { error: insertError } = await supabase.from("cart").insert({
           phone_number: phone,
           product_id: session.selected_product_id,
           quantity: 1,
           size: 'Free Size'
         });
+        if (insertError) {
+          console.error("❌ Cart insert error (ADD):", insertError.message);
+          twiml.message(`⚠️ Could not add to cart. Please try again!`);
+          return sendTwiml(res, twiml);
+        }
+        console.log("✅ Cart insert success (ADD) — phone:", phone);
       }
 
-      // ✅ Always set action_step after ADD
       await supabase
         .from("user_sessions")
         .update({ action_step: "product_action" })
@@ -585,7 +621,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 8. CART — FIXED: moved before action_step block
+    // ✅ 8. CART — top level
     if (msgUpper === "CART") {
       console.log("🛒 CART command for:", phone);
 
@@ -631,7 +667,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 9. CHECKOUT — FIXED: moved before action_step block
+    // ✅ 9. CHECKOUT — top level
     if (msgUpper === "CHECKOUT") {
       console.log("✅ CHECKOUT command for:", phone);
 
@@ -661,11 +697,10 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 10. ACTION STEP — kept exactly as your original
+    // ✅ 10. ACTION STEP — kept exactly as original
     if (session?.action_step === "product_action") {
       console.log("🎯 Action step — msg:", msg);
 
-      // ✅ ADD = Add to Cart
       if (msgUpper === "ADD") {
         if (!session?.selected_product_id) {
           twiml.message(`⚠️ Please search and select a product first!`);
@@ -736,7 +771,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ CART = View Cart
       if (msgUpper === "CART") {
         console.log("🛒 View Cart via action_step");
 
@@ -780,7 +814,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ CHECKOUT = Checkout
       if (msgUpper === "CHECKOUT") {
         console.log("✅ Checkout via action_step");
 
