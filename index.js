@@ -257,7 +257,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 2b. CHECKOUT STEP — PINCODE ✅ NEW
+    // ✅ 2b. CHECKOUT STEP — PINCODE
     if (session?.checkout_step === "pincode") {
       const pincode = msg.trim()
       if (!/^\d{6}$/.test(pincode)) {
@@ -344,7 +344,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 3. CHECKOUT STEP — ADDRESS ✅ now asks pincode next
+    // ✅ 3. CHECKOUT STEP — ADDRESS — now asks pincode next
     if (session?.checkout_step === "address") {
       await supabase
         .from("user_sessions")
@@ -355,7 +355,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 4. SIZE STEP — ✅ FIXED cart insert with error logging
+    // ✅ 4. SIZE STEP — FIXED with full error logging
     if (session?.checkout_step === "size") {
       const { data: product } = await supabase
         .from("products").select("*")
@@ -398,8 +398,8 @@ app.post("/whatsapp", async (req, res) => {
           .eq("id", existingCart.id);
 
         if (updateError) {
-          console.error("❌ Cart update error:", updateError.message);
-          twiml.message(`⚠️ Could not update cart. Please try again!`);
+          console.error("❌ Cart update error:", updateError.message, updateError.details, updateError.hint);
+          twiml.message(`⚠️ Cart error: ${updateError.message}`);
           return sendTwiml(res, twiml);
         }
 
@@ -413,21 +413,25 @@ app.post("/whatsapp", async (req, res) => {
           `Type *CHECKOUT* to Checkout`
         );
       } else {
-        // ✅ FIXED — added error check to catch silent failures
-        const { error: insertError } = await supabase.from("cart").insert({
-          phone_number: phone,
-          product_id: session.selected_product_id,
-          quantity: 1,
-          size: finalSize
-        });
+        console.log("🛒 Cart insert attempt — phone:", phone, "product_id:", session.selected_product_id, "size:", finalSize);
+
+        const { data: cartData, error: insertError } = await supabase
+          .from("cart")
+          .insert({
+            phone_number: phone,
+            product_id: session.selected_product_id,
+            quantity: 1,
+            size: finalSize
+          })
+          .select();
+
+        console.log("🛒 Cart insert result — data:", JSON.stringify(cartData), "error:", JSON.stringify(insertError));
 
         if (insertError) {
-          console.error("❌ Cart insert error:", insertError.message);
-          twiml.message(`⚠️ Could not add to cart. Please try again!`);
+          console.error("❌ Cart insert error:", insertError.message, insertError.details, insertError.hint, insertError.code);
+          twiml.message(`⚠️ Cart error: ${insertError.message}`);
           return sendTwiml(res, twiml);
         }
-
-        console.log("✅ Cart insert success — phone:", phone, "product:", session.selected_product_id, "size:", finalSize);
 
         twiml.message(
           `✅ *Added to Cart!*\n\n` +
@@ -488,7 +492,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 6. ORDER HISTORY — fixed: send via REST API separately
+    // ✅ 6. ORDER HISTORY — send via REST API separately
     if (
       msgUpper === "ORDER HISTORY" ||
       msgUpper === "MY ORDERS" ||
@@ -587,23 +591,36 @@ app.post("/whatsapp", async (req, res) => {
         .maybeSingle();
 
       if (existingCart) {
-        await supabase
+        const { error: updateError } = await supabase
           .from("cart")
           .update({ quantity: existingCart.quantity + 1 })
           .eq("id", existingCart.id);
-      } else {
-        const { error: insertError } = await supabase.from("cart").insert({
-          phone_number: phone,
-          product_id: session.selected_product_id,
-          quantity: 1,
-          size: 'Free Size'
-        });
-        if (insertError) {
-          console.error("❌ Cart insert error (ADD):", insertError.message);
-          twiml.message(`⚠️ Could not add to cart. Please try again!`);
+
+        if (updateError) {
+          console.error("❌ Cart update error (ADD):", updateError.message);
+          twiml.message(`⚠️ Cart error: ${updateError.message}`);
           return sendTwiml(res, twiml);
         }
-        console.log("✅ Cart insert success (ADD) — phone:", phone);
+      } else {
+        console.log("🛒 Cart insert attempt (ADD) — phone:", phone, "product_id:", session.selected_product_id);
+
+        const { data: cartData, error: insertError } = await supabase
+          .from("cart")
+          .insert({
+            phone_number: phone,
+            product_id: session.selected_product_id,
+            quantity: 1,
+            size: 'Free Size'
+          })
+          .select();
+
+        console.log("🛒 Cart insert result (ADD) — data:", JSON.stringify(cartData), "error:", JSON.stringify(insertError));
+
+        if (insertError) {
+          console.error("❌ Cart insert error (ADD):", insertError.message, insertError.details, insertError.hint, insertError.code);
+          twiml.message(`⚠️ Cart error: ${insertError.message}`);
+          return sendTwiml(res, twiml);
+        }
       }
 
       await supabase
