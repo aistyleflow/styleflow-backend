@@ -279,6 +279,24 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
+      // ✅ Get store_id from first cart item
+      let storeId = null;
+      const { data: firstProduct } = await supabase
+        .from("products").select("store_id")
+        .eq("id", cartItems[0].product_id).maybeSingle();
+      if (firstProduct?.store_id) storeId = firstProduct.store_id;
+
+      // ✅ Generate store_order_number
+      let storeOrderNumber = 1;
+      if (storeId) {
+        const { count } = await supabase
+          .from("orders")
+          .select("*", { count: "exact", head: true })
+          .eq("store_id", storeId);
+        storeOrderNumber = (count || 0) + 1;
+        console.log(`🔢 Store ${storeId} — Order number: ${storeOrderNumber}`);
+      }
+
       const { data: order, error: orderError } = await supabase
         .from("orders")
         .insert({
@@ -286,6 +304,8 @@ app.post("/whatsapp", async (req, res) => {
           customer_name: session.customer_name,
           customer_address: fullAddress,
           status: "pending",
+          store_id: storeId,
+          store_order_number: storeOrderNumber,
           created_at: new Date().toISOString()
         })
         .select()
@@ -299,7 +319,6 @@ app.post("/whatsapp", async (req, res) => {
 
       let orderTotal = 0;
       let orderSummary = "";
-      let storeId = null;
 
       for (const item of cartItems) {
         const { data: product } = await supabase
@@ -307,7 +326,6 @@ app.post("/whatsapp", async (req, res) => {
           .eq("id", item.product_id).maybeSingle();
 
         if (product) {
-          if (!storeId && product.store_id) storeId = product.store_id;
           await supabase.from("order_items").insert({
             order_id: order.id,
             product_id: item.product_id,
@@ -317,11 +335,6 @@ app.post("/whatsapp", async (req, res) => {
           orderTotal += itemTotal;
           orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
         }
-      }
-
-      if (storeId) {
-        await supabase.from("orders")
-          .update({ store_id: storeId }).eq("id", order.id);
       }
 
       await supabase.from("cart").delete().eq("phone_number", phone);
@@ -336,7 +349,7 @@ app.post("/whatsapp", async (req, res) => {
         `💰 *Total: ₹${orderTotal}*\n\n` +
         `👤 Name: ${session.customer_name}\n` +
         `📍 Address: ${fullAddress}\n\n` +
-        `🆔 Order ID: ${order.id}\n` +
+        `🆔 Order #${storeOrderNumber}\n` +
         `🕐 ${formatDate(new Date().toISOString())}\n\n` +
         `📦 Type *ORDER STATUS* to track your order\n\n` +
         `Thank you for shopping with *StyleFlow*! 🎉`
