@@ -960,6 +960,111 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
+// ✅ NEW: Update order status + send WhatsApp notification
+app.post("/update-status", async (req, res) => {
+  try {
+    const { orderId, newStatus } = req.body;
+
+    if (!orderId || !newStatus) {
+      return res.status(400).json({ error: "orderId and newStatus required" });
+    }
+
+    // ✅ Update status in Supabase
+    const { error: updateError } = await supabase
+      .from("orders")
+      .update({ status: newStatus })
+      .eq("id", orderId);
+
+    if (updateError) {
+      console.error("❌ Status update error:", updateError.message);
+      return res.status(500).json({ error: updateError.message });
+    }
+
+    console.log(`✅ Order ${orderId} status updated to: ${newStatus}`);
+
+    // ✅ Fetch order details for notification
+    const { data: order } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("id", orderId)
+      .single();
+
+    if (!order) {
+      return res.status(200).json({ success: true });
+    }
+
+    // ✅ Fetch store name
+    const { data: store } = await supabase
+      .from("store_owners")
+      .select("shop_name")
+      .eq("id", order.store_id)
+      .maybeSingle();
+
+    const shopName = store?.shop_name || "StyleFlow";
+    const orderNum = order.store_order_number || order.id;
+    const customerPhone = order.phone_number;
+
+    // ✅ Send WhatsApp notification based on status
+    if (newStatus === "confirmed") {
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: customerPhone,
+        body:
+          `✅ *Your order has been confirmed!*\n\n` +
+          `🆔 Order #${orderNum}\n\n` +
+          `We're preparing your order.\n\n` +
+          `Thank you for shopping with *${shopName}*! 🛍️`
+      });
+      console.log(`✅ Confirmed notification sent to ${customerPhone}`);
+    }
+
+    if (newStatus === "shipped") {
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: customerPhone,
+        body:
+          `🚚 *Your order has been shipped!*\n\n` +
+          `🆔 Order #${orderNum}\n\n` +
+          `Your order is on its way!\n\n` +
+          `Thank you for shopping with *${shopName}*! 🛍️`
+      });
+      console.log(`✅ Shipped notification sent to ${customerPhone}`);
+    }
+
+    if (newStatus === "delivered") {
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: customerPhone,
+        body:
+          `🎉 *Your order has been delivered!*\n\n` +
+          `🆔 Order #${orderNum}\n\n` +
+          `Thank you for shopping with *${shopName}*!\n\n` +
+          `We'd love to serve you again. 😊`
+      });
+      console.log(`✅ Delivered notification sent to ${customerPhone}`);
+    }
+
+    if (newStatus === "cancelled") {
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: customerPhone,
+        body:
+          `❌ *Your order has been cancelled.*\n\n` +
+          `🆔 Order #${orderNum}\n\n` +
+          `If you have any questions please contact us.\n\n` +
+          `Thank you for shopping with *${shopName}*!`
+      });
+      console.log(`✅ Cancelled notification sent to ${customerPhone}`);
+    }
+
+    return res.status(200).json({ success: true });
+
+  } catch (err) {
+    console.error("❌ update-status error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/products", async (req, res) => {
   try {
     const { data, error } = await supabase.from("products").select("*");
