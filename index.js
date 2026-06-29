@@ -1008,13 +1008,6 @@ app.post("/update-status", async (req, res) => {
         `We're preparing your order.\n\n` +
         `Thank you for shopping with *${shopName}*! 🛍️`
       );
-    } else if (newStatus === "shipped") {
-      await sendWhatsAppMessage(customerPhone,
-        `🚚 *Your order has been shipped!*\n\n` +
-        `🆔 Order #${orderNum}\n\n` +
-        `Your order is on its way!\n\n` +
-        `Thank you for shopping with *${shopName}*! 🛍️`
-      );
     } else if (newStatus === "delivered") {
       await sendWhatsAppMessage(customerPhone,
         `🎉 *Your order has been delivered!*\n\n` +
@@ -1030,7 +1023,7 @@ app.post("/update-status", async (req, res) => {
         `Thank you for shopping with *${shopName}*!`
       );
     }
-
+    
     return res.status(200).json({ success: true });
 
   } catch (err) {
