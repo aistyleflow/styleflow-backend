@@ -28,7 +28,6 @@ const supabase = createClient(
 
 const GREETINGS = ["hi", "hello", "hey", "helo", "hii", "start", "namaste"];
 
-// ✅ Format date correctly
 function formatDate(dateString) {
   if (!dateString) return 'N/A'
   const date = new Date(dateString)
@@ -44,7 +43,6 @@ function formatDate(dateString) {
   })
 }
 
-// ✅ Status emoji
 function getStatusEmoji(status) {
   switch (status) {
     case 'pending':   return '⏳'
@@ -56,10 +54,9 @@ function getStatusEmoji(status) {
   }
 }
 
-// ✅ Fetch order items
 async function getOrderItems(orderId) {
   try {
-    const { data: orderItems, error } = await supabase
+    const { data: orderItems } = await supabase
       .from('order_items')
       .select('quantity, product_id')
       .eq('order_id', orderId)
@@ -288,14 +285,12 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Get store_id from first cart item
       let storeId = null;
       const { data: firstProduct } = await supabase
         .from("products").select("store_id")
         .eq("id", cartItems[0].product_id).maybeSingle();
       if (firstProduct?.store_id) storeId = firstProduct.store_id;
 
-      // ✅ Generate store_order_number
       let storeOrderNumber = 1;
       if (storeId) {
         const { count } = await supabase
@@ -420,7 +415,7 @@ app.post("/whatsapp", async (req, res) => {
           .eq("id", existingCart.id);
 
         if (updateError) {
-          console.error("❌ Cart update error:", updateError.message, updateError.details, updateError.hint);
+          console.error("❌ Cart update error:", updateError.message);
           twiml.message(`⚠️ Cart error: ${updateError.message}`);
           return sendTwiml(res, twiml);
         }
@@ -450,7 +445,7 @@ app.post("/whatsapp", async (req, res) => {
         console.log("🛒 Cart insert result — data:", JSON.stringify(cartData), "error:", JSON.stringify(insertError));
 
         if (insertError) {
-          console.error("❌ Cart insert error:", insertError.message, insertError.details, insertError.hint, insertError.code);
+          console.error("❌ Cart insert error:", insertError.message);
           twiml.message(`⚠️ Cart error: ${insertError.message}`);
           return sendTwiml(res, twiml);
         }
@@ -473,7 +468,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 5. ORDER STATUS — latest order only
+    // ✅ 5. ORDER STATUS
     if (
       msgUpper === "ORDER STATUS" ||
       msgUpper === "STATUS" ||
@@ -514,7 +509,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 6. ORDER HISTORY — send via REST API separately
+    // ✅ 6. ORDER HISTORY
     if (
       msgUpper === "ORDER HISTORY" ||
       msgUpper === "MY ORDERS" ||
@@ -639,7 +634,7 @@ app.post("/whatsapp", async (req, res) => {
         console.log("🛒 Cart insert result (ADD) — data:", JSON.stringify(cartData), "error:", JSON.stringify(insertError));
 
         if (insertError) {
-          console.error("❌ Cart insert error (ADD):", insertError.message, insertError.details, insertError.hint, insertError.code);
+          console.error("❌ Cart insert error (ADD):", insertError.message);
           twiml.message(`⚠️ Cart error: ${insertError.message}`);
           return sendTwiml(res, twiml);
         }
@@ -881,7 +876,7 @@ app.post("/whatsapp", async (req, res) => {
       }
     }
 
-    // ✅ 11. NUMBER CHECK — product selection from list only
+    // ✅ 11. NUMBER CHECK
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
@@ -969,7 +964,7 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ✅ NEW: Update order status + send WhatsApp notification
+// ✅ Update order status + send WhatsApp notification
 app.post("/update-status", async (req, res) => {
   try {
     const { orderId, newStatus } = req.body;
@@ -988,20 +983,16 @@ app.post("/update-status", async (req, res) => {
       return res.status(500).json({ error: updateError.message });
     }
 
-    console.log(`✅ Order ${orderId} status updated to: ${newStatus}`);
-
     const { data: order } = await supabase
       .from("orders")
       .select("*")
       .eq("id", orderId)
       .single();
 
-    if (!order) {
-      return res.status(200).json({ success: true });
-    }
+    if (!order) return res.status(200).json({ success: true });
 
     const { data: store } = await supabase
-      .from("store_owners")
+      .from("shop_owners")
       .select("shop_name")
       .eq("id", order.store_id)
       .maybeSingle();
@@ -1011,38 +1002,28 @@ app.post("/update-status", async (req, res) => {
     const customerPhone = order.phone_number;
 
     if (newStatus === "confirmed") {
-      await sendWhatsAppMessage(
-        customerPhone,
+      await sendWhatsAppMessage(customerPhone,
         `✅ *Your order has been confirmed!*\n\n` +
         `🆔 Order #${orderNum}\n\n` +
         `We're preparing your order.\n\n` +
         `Thank you for shopping with *${shopName}*! 🛍️`
       );
-    }
-
-    if (newStatus === "shipped") {
-      await sendWhatsAppMessage(
-        customerPhone,
+    } else if (newStatus === "shipped") {
+      await sendWhatsAppMessage(customerPhone,
         `🚚 *Your order has been shipped!*\n\n` +
         `🆔 Order #${orderNum}\n\n` +
         `Your order is on its way!\n\n` +
         `Thank you for shopping with *${shopName}*! 🛍️`
       );
-    }
-
-    if (newStatus === "delivered") {
-      await sendWhatsAppMessage(
-        customerPhone,
+    } else if (newStatus === "delivered") {
+      await sendWhatsAppMessage(customerPhone,
         `🎉 *Your order has been delivered!*\n\n` +
         `🆔 Order #${orderNum}\n\n` +
         `Thank you for shopping with *${shopName}*!\n\n` +
         `We'd love to serve you again. 😊`
       );
-    }
-
-    if (newStatus === "cancelled") {
-      await sendWhatsAppMessage(
-        customerPhone,
+    } else if (newStatus === "cancelled") {
+      await sendWhatsAppMessage(customerPhone,
         `❌ *Your order has been cancelled.*\n\n` +
         `🆔 Order #${orderNum}\n\n` +
         `If you have any questions please contact us.\n\n` +
@@ -1054,6 +1035,130 @@ app.post("/update-status", async (req, res) => {
 
   } catch (err) {
     console.error("❌ update-status error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ NEW — Send Offer to customers
+app.post("/send-offer", async (req, res) => {
+  try {
+    const { storeId, title, description, couponCode, imageUrl, audience, customPhones } = req.body;
+
+    if (!storeId || !title || !description) {
+      return res.status(400).json({ error: "storeId, title and description required" });
+    }
+
+    console.log(`🎁 Sending offer from store ${storeId} to audience: ${audience}`);
+
+    // ✅ Get customers based on audience
+    let customerPhones = [];
+
+    if (audience === 'custom' && customPhones) {
+      // ✅ Custom selection — use provided phones
+      customerPhones = customPhones;
+
+    } else if (audience === 'all') {
+      // ✅ All customers — unique phone numbers from orders
+      const { data: orders } = await supabase
+        .from("orders")
+        .select("phone_number")
+        .eq("store_id", storeId);
+
+      customerPhones = [...new Set(orders?.map(o => o.phone_number) || [])];
+
+    } else if (audience === 'repeat') {
+      // ✅ Repeat customers — ordered more than once
+      const { data: orders } = await supabase
+        .from("orders")
+        .select("phone_number")
+        .eq("store_id", storeId);
+
+      const phoneCounts = {};
+      orders?.forEach(o => {
+        phoneCounts[o.phone_number] = (phoneCounts[o.phone_number] || 0) + 1;
+      });
+      customerPhones = Object.keys(phoneCounts).filter(p => phoneCounts[p] > 1);
+
+    } else if (audience === 'new') {
+      // ✅ New customers — ordered only once
+      const { data: orders } = await supabase
+        .from("orders")
+        .select("phone_number")
+        .eq("store_id", storeId);
+
+      const phoneCounts = {};
+      orders?.forEach(o => {
+        phoneCounts[o.phone_number] = (phoneCounts[o.phone_number] || 0) + 1;
+      });
+      customerPhones = Object.keys(phoneCounts).filter(p => phoneCounts[p] === 1);
+
+    } else if (audience === 'top') {
+      // ✅ Top customers — top 20% by order count
+      const { data: orders } = await supabase
+        .from("orders")
+        .select("phone_number")
+        .eq("store_id", storeId);
+
+      const phoneCounts = {};
+      orders?.forEach(o => {
+        phoneCounts[o.phone_number] = (phoneCounts[o.phone_number] || 0) + 1;
+      });
+
+      const sorted = Object.entries(phoneCounts)
+        .sort((a, b) => b[1] - a[1]);
+
+      const topCount = Math.max(1, Math.ceil(sorted.length * 0.2));
+      customerPhones = sorted.slice(0, topCount).map(([phone]) => phone);
+    }
+
+    console.log(`📱 Sending to ${customerPhones.length} customers`);
+
+    if (customerPhones.length === 0) {
+      return res.status(200).json({ success: true, sent: 0, message: "No customers found for this audience" });
+    }
+
+    // ✅ Build offer message
+    let offerMessage =
+      `🎁 *Special Offer from StyleFlow!*\n\n` +
+      `*${title}*\n\n` +
+      `${description}\n`
+
+    if (couponCode) {
+      offerMessage += `\n🏷️ Use coupon code: *${couponCode}*\n`
+    }
+
+    offerMessage += `\n🛍️ Shop now — just type a product name!\n`
+    offerMessage += `Happy Shopping! 🎉`
+
+    // ✅ Send to all customers
+    let sentCount = 0;
+    for (const phone of customerPhones) {
+      const sent = await sendWhatsAppMessage(phone, offerMessage);
+      if (sent) sentCount++;
+    }
+
+    // ✅ Save offer to Supabase
+    await supabase.from("offers").insert({
+      store_id: storeId,
+      title,
+      description,
+      coupon_code: couponCode || null,
+      image_url: imageUrl || null,
+      audience,
+      sent_count: sentCount,
+      created_at: new Date().toISOString()
+    });
+
+    console.log(`✅ Offer sent to ${sentCount}/${customerPhones.length} customers`);
+
+    return res.status(200).json({
+      success: true,
+      sent: sentCount,
+      total: customerPhones.length
+    });
+
+  } catch (err) {
+    console.error("❌ send-offer error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
