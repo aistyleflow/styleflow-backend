@@ -7,6 +7,15 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
+// ✅ CORS FIX
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") return res.status(200).end();
+  next();
+});
+
 const client = twilio(
   process.env.TWILIO_ACCOUNT_SID,
   process.env.TWILIO_AUTH_TOKEN
@@ -357,7 +366,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 3. CHECKOUT STEP — ADDRESS — now asks pincode next
+    // ✅ 3. CHECKOUT STEP — ADDRESS
     if (session?.checkout_step === "address") {
       await supabase
         .from("user_sessions")
@@ -368,7 +377,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 4. SIZE STEP — FIXED with full error logging
+    // ✅ 4. SIZE STEP
     if (session?.checkout_step === "size") {
       const { data: product } = await supabase
         .from("products").select("*")
@@ -494,7 +503,7 @@ app.post("/whatsapp", async (req, res) => {
 
       twiml.message(
         `📦 *Latest Order Status*\n\n` +
-        `🆔 Order #${order.id}\n` +
+        `🆔 Order #${order.store_order_number || order.id}\n` +
         `${emoji} Status: *${order.status.toUpperCase()}*\n\n` +
         `🛍️ *Items:*\n${itemsText}\n\n` +
         `👤 ${order.customer_name || 'N/A'}\n` +
@@ -544,7 +553,7 @@ app.post("/whatsapp", async (req, res) => {
 
         await sendWhatsAppMessage(
           phone,
-          `🆔 Order #${order.id}\n` +
+          `🆔 Order #${order.store_order_number || order.id}\n` +
           `${emoji} *${order.status.toUpperCase()}*\n` +
           `🕐 ${formatDate(order.created_at)}\n\n` +
           `🛍️ *Items:*\n${itemsText}\n\n` +
@@ -727,7 +736,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 10. ACTION STEP — kept exactly as original
+    // ✅ 10. ACTION STEP
     if (session?.action_step === "product_action") {
       console.log("🎯 Action step — msg:", msg);
 
@@ -969,7 +978,6 @@ app.post("/update-status", async (req, res) => {
       return res.status(400).json({ error: "orderId and newStatus required" });
     }
 
-    // ✅ Update status in Supabase
     const { error: updateError } = await supabase
       .from("orders")
       .update({ status: newStatus })
@@ -982,7 +990,6 @@ app.post("/update-status", async (req, res) => {
 
     console.log(`✅ Order ${orderId} status updated to: ${newStatus}`);
 
-    // ✅ Fetch order details for notification
     const { data: order } = await supabase
       .from("orders")
       .select("*")
@@ -993,7 +1000,6 @@ app.post("/update-status", async (req, res) => {
       return res.status(200).json({ success: true });
     }
 
-    // ✅ Fetch store name
     const { data: store } = await supabase
       .from("store_owners")
       .select("shop_name")
@@ -1004,57 +1010,44 @@ app.post("/update-status", async (req, res) => {
     const orderNum = order.store_order_number || order.id;
     const customerPhone = order.phone_number;
 
-    // ✅ Send WhatsApp notification based on status
     if (newStatus === "confirmed") {
-      await client.messages.create({
-        from: process.env.TWILIO_WHATSAPP_NUMBER,
-        to: customerPhone,
-        body:
-          `✅ *Your order has been confirmed!*\n\n` +
-          `🆔 Order #${orderNum}\n\n` +
-          `We're preparing your order.\n\n` +
-          `Thank you for shopping with *${shopName}*! 🛍️`
-      });
-      console.log(`✅ Confirmed notification sent to ${customerPhone}`);
+      await sendWhatsAppMessage(
+        customerPhone,
+        `✅ *Your order has been confirmed!*\n\n` +
+        `🆔 Order #${orderNum}\n\n` +
+        `We're preparing your order.\n\n` +
+        `Thank you for shopping with *${shopName}*! 🛍️`
+      );
     }
 
     if (newStatus === "shipped") {
-      await client.messages.create({
-        from: process.env.TWILIO_WHATSAPP_NUMBER,
-        to: customerPhone,
-        body:
-          `🚚 *Your order has been shipped!*\n\n` +
-          `🆔 Order #${orderNum}\n\n` +
-          `Your order is on its way!\n\n` +
-          `Thank you for shopping with *${shopName}*! 🛍️`
-      });
-      console.log(`✅ Shipped notification sent to ${customerPhone}`);
+      await sendWhatsAppMessage(
+        customerPhone,
+        `🚚 *Your order has been shipped!*\n\n` +
+        `🆔 Order #${orderNum}\n\n` +
+        `Your order is on its way!\n\n` +
+        `Thank you for shopping with *${shopName}*! 🛍️`
+      );
     }
 
     if (newStatus === "delivered") {
-      await client.messages.create({
-        from: process.env.TWILIO_WHATSAPP_NUMBER,
-        to: customerPhone,
-        body:
-          `🎉 *Your order has been delivered!*\n\n` +
-          `🆔 Order #${orderNum}\n\n` +
-          `Thank you for shopping with *${shopName}*!\n\n` +
-          `We'd love to serve you again. 😊`
-      });
-      console.log(`✅ Delivered notification sent to ${customerPhone}`);
+      await sendWhatsAppMessage(
+        customerPhone,
+        `🎉 *Your order has been delivered!*\n\n` +
+        `🆔 Order #${orderNum}\n\n` +
+        `Thank you for shopping with *${shopName}*!\n\n` +
+        `We'd love to serve you again. 😊`
+      );
     }
 
     if (newStatus === "cancelled") {
-      await client.messages.create({
-        from: process.env.TWILIO_WHATSAPP_NUMBER,
-        to: customerPhone,
-        body:
-          `❌ *Your order has been cancelled.*\n\n` +
-          `🆔 Order #${orderNum}\n\n` +
-          `If you have any questions please contact us.\n\n` +
-          `Thank you for shopping with *${shopName}*!`
-      });
-      console.log(`✅ Cancelled notification sent to ${customerPhone}`);
+      await sendWhatsAppMessage(
+        customerPhone,
+        `❌ *Your order has been cancelled.*\n\n` +
+        `🆔 Order #${orderNum}\n\n` +
+        `If you have any questions please contact us.\n\n` +
+        `Thank you for shopping with *${shopName}*!`
+      );
     }
 
     return res.status(200).json({ success: true });
