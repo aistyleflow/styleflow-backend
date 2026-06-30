@@ -1,7 +1,7 @@
 const express = require("express");
 const twilio = require("twilio");
 const { createClient } = require("@supabase/supabase-js");
-const messages = require("./helpers/messageTemplates");
+const messages = require("./helpers/messages");
 
 const app = express();
 
@@ -63,6 +63,21 @@ async function getShopName(storeId) {
     .eq("id", storeId)
     .maybeSingle();
   return store?.shop_name || "StyleFlow";
+}
+
+// ✅ NEW — find storeId for a customer based on their most recent order
+// Used for greeting where no product/cart context exists yet
+async function getStoreIdForCustomer(phone) {
+  const { data: lastOrder } = await supabase
+    .from("orders")
+    .select("store_id")
+    .eq("phone_number", phone)
+    .not("store_id", "is", null)
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return lastOrder?.store_id || null;
 }
 
 async function getOrderItems(orderId) {
@@ -245,12 +260,16 @@ app.post("/whatsapp", async (req, res) => {
     console.log("📋 checkout_step:", session?.checkout_step || "none");
     console.log("📋 action_step:", session?.action_step || "none");
 
-    // ✅ 1. GREETING
+    // ✅ 1. GREETING — fixed to use dynamic shopName when known
     if (GREETINGS.includes(msgLower)) {
       res.status(200).end();
+
+      const storeId = await getStoreIdForCustomer(phone);
+      const shopName = await getShopName(storeId);
+
       await sendWhatsAppMessage(
         phone,
-        `👋 Welcome to *StyleFlow*! 🛍️\n\n` +
+        `👋 Welcome to *${shopName}*! 🛍️\n\n` +
         `We are your personal fashion assistant.\n\n` +
         `🔍 *How to shop:*\n` +
         `Just type what you are looking for!\n\n` +
@@ -358,7 +377,6 @@ app.post("/whatsapp", async (req, res) => {
         .update({ checkout_step: null, action_step: null })
         .eq("phone_number", phone);
 
-      // ✅ Spot 1 — using messages helper
       const shopName = await getShopName(storeId);
 
       twiml.message(
@@ -1009,7 +1027,6 @@ app.post("/update-status", async (req, res) => {
     const orderNum = order.store_order_number || order.id;
     const customerPhone = order.phone_number;
 
-    // ✅ Spots 2, 3, 4 — using messages helper
     if (newStatus === "confirmed") {
       await sendWhatsAppMessage(customerPhone, messages.orderConfirmed(shopName, orderNum));
     } else if (newStatus === "delivered") {
@@ -1100,7 +1117,6 @@ app.post("/send-offer", async (req, res) => {
       return res.status(200).json({ success: true, sent: 0, message: "No customers found for this audience" });
     }
 
-    // ✅ Spot 5 — using messages helper
     let offerMessage = messages.offerMessage(shopName, title, description, couponCode);
 
     let sentCount = 0;
