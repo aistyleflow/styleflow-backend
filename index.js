@@ -1,6 +1,7 @@
 const express = require("express");
 const twilio = require("twilio");
 const { createClient } = require("@supabase/supabase-js");
+const messages = require("./helpers/messages");
 
 const app = express();
 
@@ -52,6 +53,16 @@ function getStatusEmoji(status) {
     case 'cancelled': return '❌'
     default:          return '📋'
   }
+}
+
+async function getShopName(storeId) {
+  if (!storeId) return "StyleFlow";
+  const { data: store } = await supabase
+    .from("shop_owners")
+    .select("shop_name")
+    .eq("id", storeId)
+    .maybeSingle();
+  return store?.shop_name || "StyleFlow";
 }
 
 async function getOrderItems(orderId) {
@@ -347,16 +358,19 @@ app.post("/whatsapp", async (req, res) => {
         .update({ checkout_step: null, action_step: null })
         .eq("phone_number", phone);
 
+      // ✅ Spot 1 — using messages helper
+      const shopName = await getShopName(storeId);
+
       twiml.message(
-        `✅ *Order Placed Successfully!*\n\n` +
-        `🧾 *Order Summary:*\n${orderSummary}\n` +
-        `💰 *Total: ₹${orderTotal}*\n\n` +
-        `👤 Name: ${session.customer_name}\n` +
-        `📍 Address: ${fullAddress}\n\n` +
-        `🆔 Order #${storeOrderNumber}\n` +
-        `🕐 ${formatDate(new Date().toISOString())}\n\n` +
-        `📦 Type *ORDER STATUS* to track your order\n\n` +
-        `Thank you for shopping with *StyleFlow*! 🎉`
+        messages.orderPlaced(
+          shopName,
+          session.customer_name,
+          orderSummary,
+          orderTotal,
+          fullAddress,
+          storeOrderNumber,
+          formatDate(new Date().toISOString())
+        )
       );
       return sendTwiml(res, twiml);
     }
@@ -991,39 +1005,19 @@ app.post("/update-status", async (req, res) => {
 
     if (!order) return res.status(200).json({ success: true });
 
-    const { data: store } = await supabase
-      .from("shop_owners")
-      .select("shop_name")
-      .eq("id", order.store_id)
-      .maybeSingle();
-
-    const shopName = store?.shop_name || "StyleFlow";
+    const shopName = await getShopName(order.store_id);
     const orderNum = order.store_order_number || order.id;
     const customerPhone = order.phone_number;
 
+    // ✅ Spots 2, 3, 4 — using messages helper
     if (newStatus === "confirmed") {
-      await sendWhatsAppMessage(customerPhone,
-        `✅ *Your order has been confirmed!*\n\n` +
-        `🆔 Order #${orderNum}\n\n` +
-        `We're preparing your order.\n\n` +
-        `Thank you for shopping with *${shopName}*! 🛍️`
-      );
+      await sendWhatsAppMessage(customerPhone, messages.orderConfirmed(shopName, orderNum));
     } else if (newStatus === "delivered") {
-      await sendWhatsAppMessage(customerPhone,
-        `🎉 *Your order has been delivered!*\n\n` +
-        `🆔 Order #${orderNum}\n\n` +
-        `Thank you for shopping with *${shopName}*!\n\n` +
-        `We'd love to serve you again. 😊`
-      );
+      await sendWhatsAppMessage(customerPhone, messages.orderDelivered(shopName, orderNum));
     } else if (newStatus === "cancelled") {
-      await sendWhatsAppMessage(customerPhone,
-        `❌ *Your order has been cancelled.*\n\n` +
-        `🆔 Order #${orderNum}\n\n` +
-        `If you have any questions please contact us.\n\n` +
-        `Thank you for shopping with *${shopName}*!`
-      );
+      await sendWhatsAppMessage(customerPhone, messages.orderCancelled(shopName, orderNum));
     }
-    
+
     return res.status(200).json({ success: true });
 
   } catch (err) {
@@ -1032,7 +1026,7 @@ app.post("/update-status", async (req, res) => {
   }
 });
 
-// ✅ NEW — Send Offer to customers
+// ✅ Send Offer to customers
 app.post("/send-offer", async (req, res) => {
   try {
     const { storeId, title, description, couponCode, imageUrl, audience, customPhones } = req.body;
@@ -1043,15 +1037,14 @@ app.post("/send-offer", async (req, res) => {
 
     console.log(`🎁 Sending offer from store ${storeId} to audience: ${audience}`);
 
-    // ✅ Get customers based on audience
+    const shopName = await getShopName(storeId);
+
     let customerPhones = [];
 
     if (audience === 'custom' && customPhones) {
-      // ✅ Custom selection — use provided phones
       customerPhones = customPhones;
 
     } else if (audience === 'all') {
-      // ✅ All customers — unique phone numbers from orders
       const { data: orders } = await supabase
         .from("orders")
         .select("phone_number")
@@ -1060,7 +1053,6 @@ app.post("/send-offer", async (req, res) => {
       customerPhones = [...new Set(orders?.map(o => o.phone_number) || [])];
 
     } else if (audience === 'repeat') {
-      // ✅ Repeat customers — ordered more than once
       const { data: orders } = await supabase
         .from("orders")
         .select("phone_number")
@@ -1073,7 +1065,6 @@ app.post("/send-offer", async (req, res) => {
       customerPhones = Object.keys(phoneCounts).filter(p => phoneCounts[p] > 1);
 
     } else if (audience === 'new') {
-      // ✅ New customers — ordered only once
       const { data: orders } = await supabase
         .from("orders")
         .select("phone_number")
@@ -1086,7 +1077,6 @@ app.post("/send-offer", async (req, res) => {
       customerPhones = Object.keys(phoneCounts).filter(p => phoneCounts[p] === 1);
 
     } else if (audience === 'top') {
-      // ✅ Top customers — top 20% by order count
       const { data: orders } = await supabase
         .from("orders")
         .select("phone_number")
@@ -1110,27 +1100,15 @@ app.post("/send-offer", async (req, res) => {
       return res.status(200).json({ success: true, sent: 0, message: "No customers found for this audience" });
     }
 
-    // ✅ Build offer message
-    let offerMessage =
-      `🎁 *Special Offer from StyleFlow!*\n\n` +
-      `*${title}*\n\n` +
-      `${description}\n`
+    // ✅ Spot 5 — using messages helper
+    let offerMessage = messages.offerMessage(shopName, title, description, couponCode);
 
-    if (couponCode) {
-      offerMessage += `\n🏷️ Use coupon code: *${couponCode}*\n`
-    }
-
-    offerMessage += `\n🛍️ Shop now — just type a product name!\n`
-    offerMessage += `Happy Shopping! 🎉`
-
-    // ✅ Send to all customers
     let sentCount = 0;
     for (const phone of customerPhones) {
       const sent = await sendWhatsAppMessage(phone, offerMessage);
       if (sent) sentCount++;
     }
 
-    // ✅ Save offer to Supabase
     await supabase.from("offers").insert({
       store_id: storeId,
       title,
