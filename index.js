@@ -1,7 +1,7 @@
 const express = require("express");
 const twilio = require("twilio");
 const { createClient } = require("@supabase/supabase-js");
-const messages = require("./helpers/messages");
+const messages = require("./helpers/messageTemplates");
 
 const app = express();
 
