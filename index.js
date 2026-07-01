@@ -55,6 +55,7 @@ function getStatusEmoji(status) {
   }
 }
 
+// ✅ Get shop name
 async function getShopName(storeId) {
   if (!storeId) return "StyleFlow";
   const { data: store } = await supabase
@@ -65,8 +66,7 @@ async function getShopName(storeId) {
   return store?.shop_name || "StyleFlow";
 }
 
-// ✅ NEW — find storeId for a customer based on their most recent order
-// Used for greeting where no product/cart context exists yet
+// ✅ Get store_id from customer's last order
 async function getStoreIdForCustomer(phone) {
   const { data: lastOrder } = await supabase
     .from("orders")
@@ -76,8 +76,18 @@ async function getStoreIdForCustomer(phone) {
     .order("id", { ascending: false })
     .limit(1)
     .maybeSingle();
-
   return lastOrder?.store_id || null;
+}
+
+// ✅ Step 1 — Load store payment settings
+async function getPaymentSettings(storeId) {
+  if (!storeId) return null;
+  const { data } = await supabase
+    .from("shop_owners")
+    .select("cod_enabled, upi_enabled, upi_id, qr_code_url, minimum_cod_amount, default_payment, payment_instructions")
+    .eq("id", storeId)
+    .maybeSingle();
+  return data;
 }
 
 async function getOrderItems(orderId) {
@@ -231,6 +241,42 @@ function sendTwiml(res, twiml) {
   res.status(200).send(xml);
 }
 
+// ✅ Step 2 — Build payment options message based on store settings
+function buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName) {
+  const codEnabled = paymentSettings?.cod_enabled !== false;
+  const upiEnabled = paymentSettings?.upi_enabled !== false;
+  const minCod = paymentSettings?.minimum_cod_amount || 0;
+  const instructions = paymentSettings?.payment_instructions || '';
+
+  let msg = `💳 *Choose Payment Method*\n\n`;
+  msg += `🧾 Order Total: ₹${orderTotal}\n\n`;
+
+  if (!codEnabled && !upiEnabled) {
+    return `⚠️ No payment methods are currently available for this store. Please contact ${shopName} for assistance.`;
+  }
+
+  // ✅ Step 3 — Show available options
+  if (codEnabled) {
+    const codBlocked = minCod > 0 && orderTotal < minCod;
+    if (codBlocked) {
+      msg += `💵 *Cash on Delivery* — Minimum order ₹${minCod} required\n\n`;
+    } else {
+      msg += `💵 *1* — Cash on Delivery (COD)\n\n`;
+    }
+  }
+
+  if (upiEnabled) {
+    msg += `📱 *2* — Pay with UPI\n\n`;
+  }
+
+  if (instructions) {
+    msg += `ℹ️ ${instructions}\n\n`;
+  }
+
+  msg += `_Reply with *1* for COD or *2* for UPI_`;
+  return msg;
+}
+
 app.post("/whatsapp", async (req, res) => {
   try {
     const body = req.body;
@@ -260,13 +306,11 @@ app.post("/whatsapp", async (req, res) => {
     console.log("📋 checkout_step:", session?.checkout_step || "none");
     console.log("📋 action_step:", session?.action_step || "none");
 
-    // ✅ 1. GREETING — fixed to use dynamic shopName when known
+    // ✅ 1. GREETING
     if (GREETINGS.includes(msgLower)) {
       res.status(200).end();
-
       const storeId = await getStoreIdForCustomer(phone);
       const shopName = await getShopName(storeId);
-
       await sendWhatsAppMessage(
         phone,
         `👋 Welcome to *${shopName}*! 🛍️\n\n` +
@@ -293,7 +337,17 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 2b. CHECKOUT STEP — PINCODE
+    // ✅ 3. CHECKOUT STEP — ADDRESS
+    if (session?.checkout_step === "address") {
+      await supabase
+        .from("user_sessions")
+        .update({ customer_address: msg, checkout_step: "pincode" })
+        .eq("phone_number", phone);
+      twiml.message(`✅ Address saved!\n\n📮 Please enter your *6-digit Pincode*:`);
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ 4. CHECKOUT STEP — PINCODE
     if (session?.checkout_step === "pincode") {
       const pincode = msg.trim()
       if (!/^\d{6}$/.test(pincode)) {
@@ -315,96 +369,209 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
+      // ✅ Calculate order total
+      let orderTotal = 0;
+      for (const item of cartItems) {
+        const { data: product } = await supabase
+          .from("products").select("price")
+          .eq("id", item.product_id).maybeSingle();
+        if (product) orderTotal += product.price * item.quantity;
+      }
+
+      // ✅ Get store_id
       let storeId = null;
       const { data: firstProduct } = await supabase
         .from("products").select("store_id")
         .eq("id", cartItems[0].product_id).maybeSingle();
       if (firstProduct?.store_id) storeId = firstProduct.store_id;
 
-      let storeOrderNumber = 1;
-      if (storeId) {
-        const { count } = await supabase
-          .from("orders")
-          .select("*", { count: "exact", head: true })
-          .eq("store_id", storeId);
-        storeOrderNumber = (count || 0) + 1;
-        console.log(`🔢 Store ${storeId} — Order number: ${storeOrderNumber}`);
-      }
+      const shopName = await getShopName(storeId);
 
-      const { data: order, error: orderError } = await supabase
-        .from("orders")
-        .insert({
-          phone_number: phone,
-          customer_name: session.customer_name,
+      // ✅ Step 1 — Load payment settings
+      const paymentSettings = await getPaymentSettings(storeId);
+
+      // ✅ Save address and total to session, move to payment step
+      await supabase
+        .from("user_sessions")
+        .update({
           customer_address: fullAddress,
-          status: "pending",
-          store_id: storeId,
-          store_order_number: storeOrderNumber,
-          created_at: new Date().toISOString()
+          checkout_step: "payment",
+          pending_store_id: storeId,
+          pending_order_total: orderTotal
         })
-        .select()
-        .single();
+        .eq("phone_number", phone);
 
-      if (orderError || !order) {
-        console.error("❌ Order error:", orderError?.message);
-        twiml.message(`⚠️ Could not place order. Please try again!`);
+      // ✅ Step 10 — Handle no payment methods
+      const codEnabled = paymentSettings?.cod_enabled !== false;
+      const upiEnabled = paymentSettings?.upi_enabled !== false;
+
+      if (!codEnabled && !upiEnabled) {
+        twiml.message(
+          `⚠️ No payment methods are currently available.\n\n` +
+          `Please contact *${shopName}* for assistance.`
+        );
         return sendTwiml(res, twiml);
       }
 
-      let orderTotal = 0;
-      let orderSummary = "";
+      // ✅ Step 2 & 3 — Show payment options
+      twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName));
+      return sendTwiml(res, twiml);
+    }
 
-      for (const item of cartItems) {
-        const { data: product } = await supabase
-          .from("products").select("*")
-          .eq("id", item.product_id).maybeSingle();
+    // ✅ 5. CHECKOUT STEP — PAYMENT SELECTION
+    if (session?.checkout_step === "payment") {
+      const storeId = session.pending_store_id;
+      const orderTotal = session.pending_order_total || 0;
+      const shopName = await getShopName(storeId);
+      const paymentSettings = await getPaymentSettings(storeId);
 
-        if (product) {
-          await supabase.from("order_items").insert({
-            order_id: order.id,
-            product_id: item.product_id,
-            quantity: item.quantity
-          });
-          const itemTotal = product.price * item.quantity;
-          orderTotal += itemTotal;
-          orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
+      const codEnabled = paymentSettings?.cod_enabled !== false;
+      const upiEnabled = paymentSettings?.upi_enabled !== false;
+      const minCod = paymentSettings?.minimum_cod_amount || 0;
+
+      // ✅ Step 4 — Handle COD
+      if (msg === "1" || msgUpper === "COD" || msgUpper === "CASH ON DELIVERY") {
+
+        if (!codEnabled) {
+          twiml.message(
+            `⚠️ Cash on Delivery is not available for this store.\n\n` +
+            `Please type *2* to pay with UPI.`
+          );
+          return sendTwiml(res, twiml);
         }
+
+        if (minCod > 0 && orderTotal < minCod) {
+          twiml.message(
+            `⚠️ COD is only available for orders above ₹${minCod}.\n\n` +
+            `Your order total is ₹${orderTotal}.\n\n` +
+            `Please type *2* to pay with UPI.`
+          );
+          return sendTwiml(res, twiml);
+        }
+
+        // ✅ COD allowed — place order
+        await supabase
+          .from("user_sessions")
+          .update({
+            checkout_step: "confirming",
+            payment_method: "COD"
+          })
+          .eq("phone_number", phone);
+
+        await placeOrder(phone, session, storeId, orderTotal, shopName, "COD", "pending", res, twiml);
+        return;
       }
 
-      await supabase.from("cart").delete().eq("phone_number", phone);
-      await supabase
-        .from("user_sessions")
-        .update({ checkout_step: null, action_step: null })
-        .eq("phone_number", phone);
+      // ✅ Step 5 — Handle UPI
+      if (msg === "2" || msgUpper === "UPI" || msgUpper === "PAY WITH UPI") {
 
-      const shopName = await getShopName(storeId);
+        if (!upiEnabled) {
+          twiml.message(
+            `⚠️ UPI payment is not available for this store.\n\n` +
+            `Please type *1* to use Cash on Delivery.`
+          );
+          return sendTwiml(res, twiml);
+        }
 
+        const upiId = paymentSettings?.upi_id;
+        const qrCodeUrl = paymentSettings?.qr_code_url;
+        const instructions = paymentSettings?.payment_instructions;
+
+        if (!upiId) {
+          twiml.message(
+            `⚠️ UPI payment is not configured for this store yet.\n\n` +
+            `Please type *1* for Cash on Delivery or contact *${shopName}*.`
+          );
+          return sendTwiml(res, twiml);
+        }
+
+        // ✅ Save payment method to session
+        await supabase
+          .from("user_sessions")
+          .update({
+            checkout_step: "awaiting_payment",
+            payment_method: "UPI"
+          })
+          .eq("phone_number", phone);
+
+        // ✅ Send UPI details
+        let upiMsg =
+          `📱 *Pay with UPI*\n\n` +
+          `🧾 Amount: ₹${orderTotal}\n\n` +
+          `🏪 Pay to: *${shopName}*\n` +
+          `📲 UPI ID: *${upiId}*\n\n`;
+
+        if (instructions) {
+          upiMsg += `ℹ️ ${instructions}\n\n`;
+        }
+
+        upiMsg += `After payment type *PAID* to confirm.`;
+
+        twiml.message(upiMsg);
+
+        // ✅ Send QR code if available
+        if (qrCodeUrl) {
+          const accessible = await isImageAccessible(qrCodeUrl);
+          if (accessible) {
+            sendTwiml(res, twiml);
+            await sendWhatsAppMessage(phone,
+              `📷 *Scan QR Code to Pay ₹${orderTotal}*\n\n` +
+              `After scanning and paying, type *PAID* to confirm your payment.`
+            );
+            // send QR image separately
+            try {
+              await client.messages.create({
+                from: process.env.TWILIO_WHATSAPP_NUMBER,
+                to: phone,
+                mediaUrl: [qrCodeUrl]
+              });
+            } catch (err) {
+              console.error("❌ QR code send error:", err.message);
+            }
+            return;
+          }
+        }
+
+        return sendTwiml(res, twiml);
+      }
+
+      // ✅ Step 10 — Invalid selection
       twiml.message(
-        messages.orderPlaced(
-          shopName,
-          session.customer_name,
-          orderSummary,
-          orderTotal,
-          fullAddress,
-          storeOrderNumber,
-          formatDate(new Date().toISOString())
-        )
+        `⚠️ Invalid selection.\n\n` +
+        buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName)
       );
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 3. CHECKOUT STEP — ADDRESS
-    if (session?.checkout_step === "address") {
-      await supabase
-        .from("user_sessions")
-        .update({ customer_address: msg, checkout_step: "pincode" })
-        .eq("phone_number", phone);
+    // ✅ 6. CHECKOUT STEP — AWAITING UPI PAYMENT (PAID confirmation)
+    if (session?.checkout_step === "awaiting_payment") {
+      if (msgUpper === "PAID" || msgUpper === "I'VE PAID" || msgUpper === "DONE") {
 
-      twiml.message(`✅ Address saved!\n\n📮 Please enter your *6-digit Pincode*:`);
-      return sendTwiml(res, twiml);
+        const storeId = session.pending_store_id;
+        const orderTotal = session.pending_order_total || 0;
+        const shopName = await getShopName(storeId);
+
+        // ✅ Step 7 — Place order with payment_status = awaiting_verification
+        await placeOrder(phone, session, storeId, orderTotal, shopName, "UPI", "awaiting_verification", res, twiml);
+        return;
+
+      } else {
+        // ✅ Customer sent something else — remind them
+        const storeId = session.pending_store_id;
+        const orderTotal = session.pending_order_total || 0;
+        const paymentSettings = await getPaymentSettings(storeId);
+        const upiId = paymentSettings?.upi_id || '';
+
+        twiml.message(
+          `⏳ *Waiting for your payment confirmation*\n\n` +
+          `Please complete payment of ₹${orderTotal} to UPI ID: *${upiId}*\n\n` +
+          `After paying, type *PAID* to confirm.`
+        );
+        return sendTwiml(res, twiml);
+      }
     }
 
-    // ✅ 4. SIZE STEP
+    // ✅ 7. SIZE STEP
     if (session?.checkout_step === "size") {
       const { data: product } = await supabase
         .from("products").select("*")
@@ -462,8 +629,6 @@ app.post("/whatsapp", async (req, res) => {
           `Type *CHECKOUT* to Checkout`
         );
       } else {
-        console.log("🛒 Cart insert attempt — phone:", phone, "product_id:", session.selected_product_id, "size:", finalSize);
-
         const { data: cartData, error: insertError } = await supabase
           .from("cart")
           .insert({
@@ -473,8 +638,6 @@ app.post("/whatsapp", async (req, res) => {
             size: finalSize
           })
           .select();
-
-        console.log("🛒 Cart insert result — data:", JSON.stringify(cartData), "error:", JSON.stringify(insertError));
 
         if (insertError) {
           console.error("❌ Cart insert error:", insertError.message);
@@ -500,14 +663,12 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 5. ORDER STATUS
+    // ✅ 8. ORDER STATUS
     if (
       msgUpper === "ORDER STATUS" ||
       msgUpper === "STATUS" ||
       msgUpper === "MY ORDER"
     ) {
-      console.log("📦 ORDER STATUS for:", phone);
-
       const { data: orders } = await supabase
         .from("orders")
         .select("*")
@@ -531,7 +692,8 @@ app.post("/whatsapp", async (req, res) => {
       twiml.message(
         `📦 *Latest Order Status*\n\n` +
         `🆔 Order #${order.store_order_number || order.id}\n` +
-        `${emoji} Status: *${order.status.toUpperCase()}*\n\n` +
+        `${emoji} Status: *${order.status.toUpperCase()}*\n` +
+        `💳 Payment: *${order.payment_method || 'N/A'}* — ${order.payment_status || 'N/A'}\n\n` +
         `🛍️ *Items:*\n${itemsText}\n\n` +
         `👤 ${order.customer_name || 'N/A'}\n` +
         `📍 ${order.customer_address || 'N/A'}\n` +
@@ -541,14 +703,12 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 6. ORDER HISTORY
+    // ✅ 9. ORDER HISTORY
     if (
       msgUpper === "ORDER HISTORY" ||
       msgUpper === "MY ORDERS" ||
       msgUpper === "HISTORY"
     ) {
-      console.log("📋 ORDER HISTORY for:", phone);
-
       const { data: orders } = await supabase
         .from("orders")
         .select("*")
@@ -582,6 +742,7 @@ app.post("/whatsapp", async (req, res) => {
           phone,
           `🆔 Order #${order.store_order_number || order.id}\n` +
           `${emoji} *${order.status.toUpperCase()}*\n` +
+          `💳 Payment: *${order.payment_method || 'N/A'}* — ${order.payment_status || 'N/A'}\n` +
           `🕐 ${formatDate(order.created_at)}\n\n` +
           `🛍️ *Items:*\n${itemsText}\n\n` +
           `👤 ${order.customer_name || 'N/A'}\n` +
@@ -599,10 +760,8 @@ app.post("/whatsapp", async (req, res) => {
       return;
     }
 
-    // ✅ 7. ADD — top level
+    // ✅ 10. ADD — top level
     if (msgUpper === "ADD") {
-      console.log("➕ ADD command for:", phone);
-
       if (!session?.selected_product_id) {
         twiml.message(`⚠️ Please select a product first by searching!`);
         return sendTwiml(res, twiml);
@@ -640,33 +799,21 @@ app.post("/whatsapp", async (req, res) => {
         .maybeSingle();
 
       if (existingCart) {
-        const { error: updateError } = await supabase
+        await supabase
           .from("cart")
           .update({ quantity: existingCart.quantity + 1 })
           .eq("id", existingCart.id);
-
-        if (updateError) {
-          console.error("❌ Cart update error (ADD):", updateError.message);
-          twiml.message(`⚠️ Cart error: ${updateError.message}`);
-          return sendTwiml(res, twiml);
-        }
       } else {
-        console.log("🛒 Cart insert attempt (ADD) — phone:", phone, "product_id:", session.selected_product_id);
-
-        const { data: cartData, error: insertError } = await supabase
+        const { error: insertError } = await supabase
           .from("cart")
           .insert({
             phone_number: phone,
             product_id: session.selected_product_id,
             quantity: 1,
             size: 'Free Size'
-          })
-          .select();
-
-        console.log("🛒 Cart insert result (ADD) — data:", JSON.stringify(cartData), "error:", JSON.stringify(insertError));
+          });
 
         if (insertError) {
-          console.error("❌ Cart insert error (ADD):", insertError.message);
           twiml.message(`⚠️ Cart error: ${insertError.message}`);
           return sendTwiml(res, twiml);
         }
@@ -687,14 +834,10 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 8. CART — top level
+    // ✅ 11. CART — top level
     if (msgUpper === "CART") {
-      console.log("🛒 CART command for:", phone);
-
       const { data: cartItems } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
-
-      console.log("🛒 Cart items found:", cartItems?.length || 0);
 
       if (!cartItems || cartItems.length === 0) {
         twiml.message(
@@ -733,14 +876,10 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 9. CHECKOUT — top level
+    // ✅ 12. CHECKOUT — top level
     if (msgUpper === "CHECKOUT") {
-      console.log("✅ CHECKOUT command for:", phone);
-
       const { data: cartCheck } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
-
-      console.log("✅ Cart items for checkout:", cartCheck?.length || 0);
 
       if (!cartCheck || cartCheck.length === 0) {
         twiml.message(
@@ -763,17 +902,12 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 10. ACTION STEP
+    // ✅ 13. ACTION STEP
     if (session?.action_step === "product_action") {
-      console.log("🎯 Action step — msg:", msg);
-
       if (msgUpper === "ADD") {
         if (!session?.selected_product_id) {
           twiml.message(`⚠️ Please search and select a product first!`);
-          await supabase
-            .from("user_sessions")
-            .update({ action_step: null })
-            .eq("phone_number", phone);
+          await supabase.from("user_sessions").update({ action_step: null }).eq("phone_number", phone);
           return sendTwiml(res, twiml);
         }
 
@@ -782,22 +916,20 @@ app.post("/whatsapp", async (req, res) => {
           .eq("id", session.selected_product_id).maybeSingle();
 
         if (!product) {
-          twiml.message(`⚠️ Product not found. Please search again!`);
+          twiml.message(`⚠️ Product not found.`);
           return sendTwiml(res, twiml);
         }
 
         if (product.size && product.size.trim() !== '') {
-          await supabase
-            .from("user_sessions")
+          await supabase.from("user_sessions")
             .update({ checkout_step: "size", action_step: null })
             .eq("phone_number", phone);
-
           twiml.message(
             `📐 *Select Size*\n\n` +
             `Product: *${product.product_name}*\n\n` +
             `Available sizes:\n` +
             product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
-            `\n\nType your size (e.g. *M* or *XL*)`
+            `\n\nType your size`
           );
           return sendTwiml(res, twiml);
         }
@@ -809,8 +941,7 @@ app.post("/whatsapp", async (req, res) => {
           .maybeSingle();
 
         if (existingCart) {
-          await supabase
-            .from("cart")
+          await supabase.from("cart")
             .update({ quantity: existingCart.quantity + 1 })
             .eq("id", existingCart.id);
         } else {
@@ -822,8 +953,7 @@ app.post("/whatsapp", async (req, res) => {
           });
         }
 
-        await supabase
-          .from("user_sessions")
+        await supabase.from("user_sessions")
           .update({ action_step: "product_action" })
           .eq("phone_number", phone);
 
@@ -838,16 +968,11 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       if (msgUpper === "CART") {
-        console.log("🛒 View Cart via action_step");
-
         const { data: cartItems } = await supabase
           .from("cart").select("*").eq("phone_number", phone);
 
         if (!cartItems || cartItems.length === 0) {
-          twiml.message(
-            `🛒 Your cart is empty.\n\n` +
-            `Search for products and type *ADD* to add them!`
-          );
+          twiml.message(`🛒 Your cart is empty.\n\nSearch for products and type *ADD*!`);
           return sendTwiml(res, twiml);
         }
 
@@ -859,7 +984,6 @@ app.post("/whatsapp", async (req, res) => {
           const { data: product } = await supabase
             .from("products").select("*")
             .eq("id", cartItems[i].product_id).maybeSingle();
-
           if (product) {
             const itemTotal = product.price * cartItems[i].quantity;
             total += itemTotal;
@@ -871,31 +995,23 @@ app.post("/whatsapp", async (req, res) => {
         }
 
         reply += `─────────────────\n`;
-        reply += `🧾 *Total: ₹${total}*\n`;
-        reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart\n\n`;
-        reply += `Type *CHECKOUT* to place your order\n`;
-        reply += `🔍 Or search for more products!`;
+        reply += `🧾 *Total: ₹${total}*\n\n`;
+        reply += `Type *CHECKOUT* to place your order`;
 
         twiml.message(reply);
         return sendTwiml(res, twiml);
       }
 
       if (msgUpper === "CHECKOUT") {
-        console.log("✅ Checkout via action_step");
-
         const { data: cartCheck } = await supabase
           .from("cart").select("*").eq("phone_number", phone);
 
         if (!cartCheck || cartCheck.length === 0) {
-          twiml.message(
-            `⚠️ Your cart is empty!\n\n` +
-            `Search for products and type *ADD* to add them first.`
-          );
+          twiml.message(`⚠️ Your cart is empty!`);
           return sendTwiml(res, twiml);
         }
 
-        await supabase
-          .from("user_sessions")
+        await supabase.from("user_sessions")
           .update({ checkout_step: "name", action_step: null })
           .eq("phone_number", phone);
 
@@ -908,11 +1024,10 @@ app.post("/whatsapp", async (req, res) => {
       }
     }
 
-    // ✅ 11. NUMBER CHECK
+    // ✅ 14. NUMBER CHECK
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
-      console.log(`🔢 Product selection: ${msg}`);
       const index = parseInt(msg) - 1;
 
       if (!session || !session.last_results) {
@@ -937,9 +1052,7 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       await saveSelectedProduct(phone, freshProduct.id);
-
-      await supabase
-        .from("user_sessions")
+      await supabase.from("user_sessions")
         .update({ action_step: "product_action" })
         .eq("phone_number", phone);
 
@@ -947,30 +1060,25 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 12. SEARCH
-    console.log(`🔍 Searching: "${msg}"`);
-
+    // ✅ 15. SEARCH
     const { data, error } = await supabase
       .from("products").select("*")
       .or(`product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`);
 
     if (data && data.length > 0) {
       await saveSession(phone, data);
-
-      await supabase
-        .from("user_sessions")
+      await supabase.from("user_sessions")
         .update({ action_step: null })
         .eq("phone_number", phone);
 
       if (data.length === 1) {
         await saveSelectedProduct(phone, data[0].id);
-        await supabase
-          .from("user_sessions")
+        await supabase.from("user_sessions")
           .update({ action_step: "product_action" })
           .eq("phone_number", phone);
         await sendProductMessage(twiml, data[0]);
       } else {
-        let response = `🛍️ *StyleFlow* — Products matching "${msg}":\n\n`;
+        let response = `🛍️ *Products matching "${msg}"*:\n\n`;
         data.forEach((product, index) => {
           response += `${index + 1}. *${product.product_name}*\n`;
           response += `   💰 ₹${product.price}\n`;
@@ -996,6 +1104,122 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
+// ✅ Shared order placement function
+async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
+  try {
+    const { data: cartItems } = await supabase
+      .from("cart").select("*").eq("phone_number", phone);
+
+    if (!cartItems || cartItems.length === 0) {
+      twiml.message(`⚠️ Your cart is empty!`);
+      return sendTwiml(res, twiml);
+    }
+
+    let storeOrderNumber = 1;
+    if (storeId) {
+      const { count } = await supabase
+        .from("orders")
+        .select("*", { count: "exact", head: true })
+        .eq("store_id", storeId);
+      storeOrderNumber = (count || 0) + 1;
+    }
+
+    // ✅ Step 6 — Save payment details with order
+    const { data: order, error: orderError } = await supabase
+      .from("orders")
+      .insert({
+        phone_number: phone,
+        customer_name: session.customer_name,
+        customer_address: session.customer_address,
+        status: "pending",
+        store_id: storeId,
+        store_order_number: storeOrderNumber,
+        payment_method: paymentMethod,
+        payment_status: paymentStatus,
+        payment_amount: orderTotal,
+        created_at: new Date().toISOString()
+      })
+      .select()
+      .single();
+
+    if (orderError || !order) {
+      console.error("❌ Order error:", orderError?.message);
+      twiml.message(`⚠️ Could not place order. Please try again!`);
+      return sendTwiml(res, twiml);
+    }
+
+    let orderSummary = "";
+
+    for (const item of cartItems) {
+      const { data: product } = await supabase
+        .from("products").select("*")
+        .eq("id", item.product_id).maybeSingle();
+
+      if (product) {
+        await supabase.from("order_items").insert({
+          order_id: order.id,
+          product_id: item.product_id,
+          quantity: item.quantity
+        });
+        const itemTotal = product.price * item.quantity;
+        orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
+      }
+    }
+
+    await supabase.from("cart").delete().eq("phone_number", phone);
+    await supabase
+      .from("user_sessions")
+      .update({ checkout_step: null, action_step: null })
+      .eq("phone_number", phone);
+
+    // ✅ Step 8 — Send correct payment message
+    let orderMsg = messages.orderPlaced(
+      shopName,
+      session.customer_name,
+      orderSummary,
+      orderTotal,
+      session.customer_address,
+      storeOrderNumber,
+      formatDate(new Date().toISOString())
+    );
+
+    if (paymentMethod === "COD") {
+      orderMsg += `\n\n💵 *Payment Method:* Cash on Delivery\n💳 *Payment Status:* Pending`;
+    } else if (paymentMethod === "UPI" && paymentStatus === "awaiting_verification") {
+      orderMsg += `\n\n📱 *Payment Method:* UPI\n⏳ *Payment Status:* Awaiting Verification\n\nWe will confirm your order once payment is verified.`;
+    }
+
+    twiml.message(orderMsg);
+    sendTwiml(res, twiml);
+
+    // ✅ Step 7 — Notify store owner if UPI payment awaiting verification
+    if (paymentMethod === "UPI" && paymentStatus === "awaiting_verification") {
+      const { data: storeOwner } = await supabase
+        .from("shop_owners")
+        .select("phone_number")
+        .eq("id", storeId)
+        .maybeSingle();
+
+      if (storeOwner?.phone_number) {
+        await sendWhatsAppMessage(
+          `whatsapp:${storeOwner.phone_number}`,
+          `💳 *UPI Payment Received — Verify Required*\n\n` +
+          `🆔 Order #${storeOrderNumber}\n` +
+          `👤 Customer: ${session.customer_name}\n` +
+          `💰 Amount: ₹${orderTotal}\n` +
+          `📱 Payment via UPI\n\n` +
+          `Please verify the payment in your UPI app and update the order status.`
+        );
+      }
+    }
+
+  } catch (err) {
+    console.error("❌ placeOrder error:", err.message);
+    twiml.message(`⚠️ Something went wrong. Please try again!`);
+    return sendTwiml(res, twiml);
+  }
+}
+
 // ✅ Update order status + send WhatsApp notification
 app.post("/update-status", async (req, res) => {
   try {
@@ -1011,15 +1235,11 @@ app.post("/update-status", async (req, res) => {
       .eq("id", orderId);
 
     if (updateError) {
-      console.error("❌ Status update error:", updateError.message);
       return res.status(500).json({ error: updateError.message });
     }
 
     const { data: order } = await supabase
-      .from("orders")
-      .select("*")
-      .eq("id", orderId)
-      .single();
+      .from("orders").select("*").eq("id", orderId).single();
 
     if (!order) return res.status(200).json({ success: true });
 
@@ -1029,6 +1249,8 @@ app.post("/update-status", async (req, res) => {
 
     if (newStatus === "confirmed") {
       await sendWhatsAppMessage(customerPhone, messages.orderConfirmed(shopName, orderNum));
+    } else if (newStatus === "shipped") {
+      await sendWhatsAppMessage(customerPhone, messages.orderShipped(shopName, orderNum));
     } else if (newStatus === "delivered") {
       await sendWhatsAppMessage(customerPhone, messages.orderDelivered(shopName, orderNum));
     } else if (newStatus === "cancelled") {
@@ -1052,74 +1274,42 @@ app.post("/send-offer", async (req, res) => {
       return res.status(400).json({ error: "storeId, title and description required" });
     }
 
-    console.log(`🎁 Sending offer from store ${storeId} to audience: ${audience}`);
-
     const shopName = await getShopName(storeId);
-
     let customerPhones = [];
 
     if (audience === 'custom' && customPhones) {
       customerPhones = customPhones;
-
-    } else if (audience === 'all') {
+    } else {
       const { data: orders } = await supabase
-        .from("orders")
-        .select("phone_number")
-        .eq("store_id", storeId);
-
-      customerPhones = [...new Set(orders?.map(o => o.phone_number) || [])];
-
-    } else if (audience === 'repeat') {
-      const { data: orders } = await supabase
-        .from("orders")
-        .select("phone_number")
-        .eq("store_id", storeId);
-
-      const phoneCounts = {};
-      orders?.forEach(o => {
-        phoneCounts[o.phone_number] = (phoneCounts[o.phone_number] || 0) + 1;
-      });
-      customerPhones = Object.keys(phoneCounts).filter(p => phoneCounts[p] > 1);
-
-    } else if (audience === 'new') {
-      const { data: orders } = await supabase
-        .from("orders")
-        .select("phone_number")
-        .eq("store_id", storeId);
-
-      const phoneCounts = {};
-      orders?.forEach(o => {
-        phoneCounts[o.phone_number] = (phoneCounts[o.phone_number] || 0) + 1;
-      });
-      customerPhones = Object.keys(phoneCounts).filter(p => phoneCounts[p] === 1);
-
-    } else if (audience === 'top') {
-      const { data: orders } = await supabase
-        .from("orders")
-        .select("phone_number")
-        .eq("store_id", storeId);
+        .from("orders").select("phone_number").eq("store_id", storeId);
 
       const phoneCounts = {};
       orders?.forEach(o => {
         phoneCounts[o.phone_number] = (phoneCounts[o.phone_number] || 0) + 1;
       });
 
-      const sorted = Object.entries(phoneCounts)
-        .sort((a, b) => b[1] - a[1]);
+      const allPhones = Object.keys(phoneCounts);
 
-      const topCount = Math.max(1, Math.ceil(sorted.length * 0.2));
-      customerPhones = sorted.slice(0, topCount).map(([phone]) => phone);
+      if (audience === 'all') {
+        customerPhones = allPhones;
+      } else if (audience === 'repeat') {
+        customerPhones = allPhones.filter(p => phoneCounts[p] > 1);
+      } else if (audience === 'new') {
+        customerPhones = allPhones.filter(p => phoneCounts[p] === 1);
+      } else if (audience === 'top') {
+        const sorted = Object.entries(phoneCounts).sort((a, b) => b[1] - a[1]);
+        const topCount = Math.max(1, Math.ceil(sorted.length * 0.2));
+        customerPhones = sorted.slice(0, topCount).map(([p]) => p);
+      }
     }
-
-    console.log(`📱 Sending to ${customerPhones.length} customers`);
 
     if (customerPhones.length === 0) {
-      return res.status(200).json({ success: true, sent: 0, message: "No customers found for this audience" });
+      return res.status(200).json({ success: true, sent: 0, message: "No customers found" });
     }
 
-    let offerMessage = messages.offerMessage(shopName, title, description, couponCode);
-
+    const offerMessage = messages.offerMessage(shopName, title, description, couponCode);
     let sentCount = 0;
+
     for (const phone of customerPhones) {
       const sent = await sendWhatsAppMessage(phone, offerMessage);
       if (sent) sentCount++;
@@ -1136,13 +1326,7 @@ app.post("/send-offer", async (req, res) => {
       created_at: new Date().toISOString()
     });
 
-    console.log(`✅ Offer sent to ${sentCount}/${customerPhones.length} customers`);
-
-    return res.status(200).json({
-      success: true,
-      sent: sentCount,
-      total: customerPhones.length
-    });
+    return res.status(200).json({ success: true, sent: sentCount, total: customerPhones.length });
 
   } catch (err) {
     console.error("❌ send-offer error:", err.message);
