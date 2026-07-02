@@ -102,16 +102,21 @@ async function getSavedAddress(phone, storeId) {
   return data;
 }
 
-// ✅ NEW: Save or update customer address
-async function saveCustomerAddress(phone, storeId, customerName, address) {
+// ✅ Save or update customer address with pincode
+async function saveCustomerAddress(phone, storeId, customerName, address, pincode) {
   try {
     const existing = await getSavedAddress(phone, storeId);
+
+    // ✅ Extract pincode from address if not provided separately
+    const resolvedPincode = pincode || (address.match(/\d{6}/) || [])[0] || null;
+
     if (existing) {
       await supabase
         .from("customer_addresses")
         .update({
           customer_name: customerName,
           address: address,
+          pincode: resolvedPincode,
           updated_at: new Date().toISOString()
         })
         .eq("phone_number", phone)
@@ -124,10 +129,12 @@ async function saveCustomerAddress(phone, storeId, customerName, address) {
           store_id: storeId,
           customer_name: customerName,
           address: address,
+          pincode: resolvedPincode,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
         });
     }
+    console.log("✅ Customer address saved — pincode:", resolvedPincode);
   } catch (err) {
     console.error("❌ saveCustomerAddress error:", err.message);
   }
@@ -1291,7 +1298,10 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
 
     // ✅ Save customer address after successful order
     if (storeId && session.customer_name && session.customer_address) {
-      await saveCustomerAddress(phone, storeId, session.customer_name, session.customer_address);
+      // ✅ Extract pincode from full address (last 6 digits)
+      const pincodeMatch = session.customer_address ? session.customer_address.match(/\d{6}/) : null;
+      const extractedPincode = pincodeMatch ? pincodeMatch[0] : null;
+      await saveCustomerAddress(phone, storeId, session.customer_name, session.customer_address, extractedPincode);
     }
 
     let orderMsg = messages.orderPlaced(
