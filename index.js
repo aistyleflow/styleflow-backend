@@ -150,9 +150,9 @@ async function incrementStoreMessageUsage(storeId, direction) {
 async function getPaymentSettings(storeId) {
   if (!storeId) return null;
   const { data } = await supabase
-    .from("shop_owners")
+    .from("store_payment_settings")
     .select("cod_enabled, upi_enabled, upi_id, qr_code_url, minimum_cod_amount, default_payment, payment_instructions")
-    .eq("id", storeId)
+    .eq("store_id", storeId)
     .maybeSingle();
   console.log(`💳 Payment settings for store ${storeId}:`, JSON.stringify(data));
   return data || null;
@@ -1697,4 +1697,4 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 StyleFlow server running on port ${PORT}`);
-});
+});w
