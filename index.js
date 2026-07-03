@@ -241,14 +241,12 @@ async function getOrderItems(orderId) {
   }
 }
 
-// ✅ Helper 1 — check if customer is in active unfinished order flow
 function isInActiveOrderFlow(session) {
   if (!session) return false;
   const activeSteps = ["name", "address", "pincode", "payment", "awaiting_payment", "saved_address_choice", "size"];
   return activeSteps.includes(session.checkout_step);
 }
 
-// ✅ Helper 2 — clear full order session + cart
 async function clearOrderSession(phone) {
   try {
     await supabase.from("cart").delete().eq("phone_number", phone);
@@ -272,7 +270,6 @@ async function clearOrderSession(phone) {
   }
 }
 
-// ✅ Helper 3 — get last placed order
 async function getLastPlacedOrder(phone, storeId) {
   try {
     let query = supabase
@@ -290,7 +287,6 @@ async function getLastPlacedOrder(phone, storeId) {
   }
 }
 
-// ✅ Helper 4 — get store owner phone
 async function getStorePhone(storeId) {
   if (!storeId) return null;
   try {
@@ -1058,7 +1054,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 11. ORDER HISTORY — fixed totalSpent calculation
+    // ✅ 11. ORDER HISTORY — totalSpent with fallback chain + debug log
     if (msgUpper === "ORDER HISTORY" || msgUpper === "MY ORDERS" || msgUpper === "HISTORY") {
       const { data: orders } = await supabase
         .from("orders")
@@ -1076,15 +1072,26 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Calculate totalSpent — only delivered orders using payment_amount
+      // ✅ FIXED — totalSpent with fallback chain
       const deliveredOrders = orders.filter(
         o => o.status && o.status.toLowerCase() === "delivered"
       );
 
       const totalSpent = deliveredOrders.reduce(
-        (sum, o) => sum + Number(o.payment_amount || 0),
+        (sum, o) =>
+          sum + Number(o.payment_amount || o.total_amount || o.order_total || o.total || 0),
         0
       );
+
+      // ✅ Debug log — shows which field has the value
+      console.log("📦 Delivered orders for history:", deliveredOrders.map(o => ({
+        id: o.id,
+        status: o.status,
+        payment_amount: o.payment_amount,
+        total_amount: o.total_amount,
+        order_total: o.order_total,
+        total: o.total
+      })));
 
       console.log(`💰 Total spent (delivered only): ₹${totalSpent} from ${deliveredOrders.length} delivered orders`);
 
@@ -1092,7 +1099,6 @@ app.post("/whatsapp", async (req, res) => {
 
       const historyStoreId = orders[0]?.store_id || activeStoreId;
 
-      // ✅ Send header with total spent
       await incrementStoreMessageUsage(historyStoreId, "outgoing");
       await sendWhatsAppMessage(
         phone,
