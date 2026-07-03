@@ -145,24 +145,19 @@ async function incrementStoreMessageUsage(storeId, direction) {
   }
 }
 
-// ✅ CHANGE 1 — Read from store_payment_settings table with .eq("store_id", storeId)
 async function getPaymentSettings(storeId) {
   if (!storeId) return null;
-
   console.log(`💳 Fetching payment settings for store_id: ${storeId}`);
-
   const { data, error } = await supabase
     .from("store_payment_settings")
     .select("cod_enabled, upi_enabled, upi_id, qr_code_url, minimum_cod_amount, default_payment, payment_instructions")
     .eq("store_id", storeId)
     .maybeSingle();
-
   if (error) {
     console.error("❌ getPaymentSettings error:", error.message);
     return null;
   }
-
-  console.log(`💳 Payment settings found:`, JSON.stringify(data));
+  console.log(`💳 Payment settings:`, JSON.stringify(data));
   return data || null;
 }
 
@@ -244,6 +239,77 @@ async function getOrderItems(orderId) {
   } catch (err) {
     console.error("❌ getOrderItems error:", err.message)
     return '   Error fetching items'
+  }
+}
+
+// ✅ HELPER 1 — check if customer is in an active unfinished order flow
+function isInActiveOrderFlow(session) {
+  if (!session) return false;
+  const activeSteps = ["name", "address", "pincode", "payment", "awaiting_payment", "saved_address_choice", "size"];
+  return activeSteps.includes(session.checkout_step);
+}
+
+// ✅ HELPER 2 — clear full order session + cart
+async function clearOrderSession(phone) {
+  try {
+    // ✅ Clear cart
+    await supabase.from("cart").delete().eq("phone_number", phone);
+
+    // ✅ Reset all checkout/order session fields — keep store_id so customer stays in store
+    await supabase
+      .from("user_sessions")
+      .update({
+        checkout_step: null,
+        action_step: null,
+        customer_name: null,
+        customer_address: null,
+        selected_product_id: null,
+        pending_store_id: null,
+        pending_order_total: null,
+        payment_method: null,
+        saved_address_data: null
+      })
+      .eq("phone_number", phone);
+
+    console.log("✅ Order session cleared for:", phone);
+  } catch (err) {
+    console.error("❌ clearOrderSession error:", err.message);
+  }
+}
+
+// ✅ HELPER 3 — get last placed order + store phone number
+async function getLastPlacedOrder(phone, storeId) {
+  try {
+    let query = supabase
+      .from("orders")
+      .select("*")
+      .eq("phone_number", phone)
+      .order("id", { ascending: false })
+      .limit(1);
+
+    if (storeId) query = query.eq("store_id", storeId);
+
+    const { data: orders } = await query;
+    return orders && orders.length > 0 ? orders[0] : null;
+  } catch (err) {
+    console.error("❌ getLastPlacedOrder error:", err.message);
+    return null;
+  }
+}
+
+// ✅ Get store owner phone number
+async function getStorePhone(storeId) {
+  if (!storeId) return null;
+  try {
+    const { data } = await supabase
+      .from("shop_owners")
+      .select("phone_number, shop_name")
+      .eq("id", storeId)
+      .maybeSingle();
+    return data || null;
+  } catch (err) {
+    console.error("❌ getStorePhone error:", err.message);
+    return null;
   }
 }
 
@@ -437,6 +503,89 @@ app.post("/whatsapp", async (req, res) => {
       await incrementStoreMessageUsage(activeStoreId, "incoming");
     }
 
+    // ✅ CANCEL COMMAND — handle early before all other logic
+    if (msgLower === "cancel") {
+      console.log("🚫 CANCEL command received");
+
+      // ✅ Case A — customer is in active unfinished order flow
+      if (isInActiveOrderFlow(session)) {
+        console.log("🚫 Active order flow detected — clearing session");
+        await clearOrderSession(phone);
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(
+          `🚫 *Order process cancelled.*\n\n` +
+          `Your cart and current order progress have been cleared.\n\n` +
+          `If you'd like to order again, just send the store code and start again! 🛍️`
+        );
+        return sendTwiml(res, twiml);
+      }
+
+      // ✅ Case B — check if order already placed
+      const lastOrder = await getLastPlacedOrder(phone, activeStoreId);
+
+      if (lastOrder && ['pending', 'confirmed', 'shipped'].includes(lastOrder.status)) {
+        console.log("🚫 Order already placed — showing store contact");
+        const storeInfo = await getStorePhone(lastOrder.store_id);
+        const storePhone = storeInfo?.phone_number || null;
+        const storeName = storeInfo?.shop_name || "the store";
+
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(
+          `⚠️ *Your order has already been placed.*\n\n` +
+          `Order #${lastOrder.store_order_number || lastOrder.id} cannot be cancelled through WhatsApp automatically.\n\n` +
+          `Please contact *${storeName}*` +
+          (storePhone ? ` at *${storePhone}*` : '') +
+          ` for cancellation or further assistance.`
+        );
+        return sendTwiml(res, twiml);
+      }
+
+      // ✅ Case C — no active order and no recent placed order
+      await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      twiml.message(
+        `ℹ️ There's no active order to cancel right now.\n\n` +
+        `Search for products to start shopping! 🛍️`
+      );
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ CLEAR CART COMMAND — handle early before all other logic
+    if (msgLower === "clear cart" || msgUpper === "CLEAR CART") {
+      console.log("🛒 CLEAR CART command received");
+
+      const { data: cartItems } = await supabase
+        .from("cart").select("*").eq("phone_number", phone);
+
+      if (!cartItems || cartItems.length === 0) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(
+          `🛒 Your cart is already empty.\n\n` +
+          `Search for products to start shopping! 🛍️`
+        );
+        return sendTwiml(res, twiml);
+      }
+
+      // ✅ Clear only cart — keep store session active
+      await supabase.from("cart").delete().eq("phone_number", phone);
+
+      // ✅ Also reset product selection but keep store_id
+      await supabase
+        .from("user_sessions")
+        .update({
+          selected_product_id: null,
+          action_step: null
+        })
+        .eq("phone_number", phone);
+
+      await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      twiml.message(
+        `✅ *Cart cleared!*\n\n` +
+        `Your cart has been cleared. You can continue browsing and build a new order.\n\n` +
+        `🔍 Just type a product name to search!`
+      );
+      return sendTwiml(res, twiml);
+    }
+
     // ✅ 1. GREETING
     if (GREETINGS.includes(msgLower)) {
       res.status(200).end();
@@ -516,7 +665,6 @@ app.post("/whatsapp", async (req, res) => {
       const upiEnabled = paymentSettings?.upi_enabled !== false;
       const minCod = paymentSettings?.minimum_cod_amount || 0;
 
-      // ✅ COD selected
       if (msg === "1" || msgUpper === "COD" || msgUpper === "CASH ON DELIVERY") {
         if (!codEnabled) {
           await incrementStoreMessageUsage(storeId, "outgoing");
@@ -535,7 +683,6 @@ app.post("/whatsapp", async (req, res) => {
         return;
       }
 
-      // ✅ CHANGE 2 — UPI selected with proper QR sending and logs
       if (msg === "2" || msgUpper === "UPI" || msgUpper === "PAY WITH UPI") {
         if (!upiEnabled) {
           await incrementStoreMessageUsage(storeId, "outgoing");
@@ -547,7 +694,6 @@ app.post("/whatsapp", async (req, res) => {
         const qrCodeUrl = paymentSettings?.qr_code_url;
         const instructions = paymentSettings?.payment_instructions;
 
-        // ✅ Logs for debugging
         console.log("📱 UPI selected");
         console.log("📱 upi_id:", upiId || "NOT SET");
         console.log("📷 qr_code_url:", qrCodeUrl || "NOT SET");
@@ -562,7 +708,6 @@ app.post("/whatsapp", async (req, res) => {
           return sendTwiml(res, twiml);
         }
 
-        // ✅ Save session as awaiting_payment
         await supabase
           .from("user_sessions")
           .update({
@@ -571,32 +716,25 @@ app.post("/whatsapp", async (req, res) => {
           })
           .eq("phone_number", phone);
 
-        // ✅ Build UPI instruction message
         let upiMsg =
           `📱 *Pay with UPI*\n\n` +
           `🧾 Amount: *₹${orderTotal}*\n\n` +
           `🏪 Pay to: *${shopName}*\n` +
           `📲 UPI ID: *${upiId}*\n\n`;
 
-        if (instructions) {
-          upiMsg += `ℹ️ ${instructions}\n\n`;
-        }
-
+        if (instructions) upiMsg += `ℹ️ ${instructions}\n\n`;
         upiMsg +=
           `─────────────────\n` +
-          `After paying, type *PAID* to confirm ✅`;
+          `After paying, type *PAID* to confirm ✅\n` +
+          `Or type *CANCEL* to cancel this order.`;
 
-        // ✅ Send UPI text message via TwiML
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(upiMsg);
         sendTwiml(res, twiml);
 
-        // ✅ Send QR code separately via REST API
         if (qrCodeUrl) {
           console.log("📷 QR code URL found — attempting to send...");
-
           const accessible = await isImageAccessible(qrCodeUrl);
-
           if (accessible) {
             console.log("✅ QR URL accessible — sending via Twilio media...");
             try {
@@ -610,19 +748,17 @@ app.post("/whatsapp", async (req, res) => {
               await incrementStoreMessageUsage(storeId, "outgoing");
             } catch (qrErr) {
               console.error("❌ QR send failed:", qrErr.message);
-              console.error("❌ QR error details:", JSON.stringify(qrErr));
-              // ✅ Fallback text if QR fails
               await sendWhatsAppMessage(
                 phone,
-                `⚠️ QR code could not be sent.\n\nPlease use the UPI ID above to pay manually:\n*${upiId}*\n\nAfter paying, type *PAID* to confirm.`
+                `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`
               );
               await incrementStoreMessageUsage(storeId, "outgoing");
             }
           } else {
-            console.log("❌ QR URL not accessible — sending fallback text");
+            console.log("❌ QR URL not accessible — sending fallback");
             await sendWhatsAppMessage(
               phone,
-              `⚠️ QR code could not be loaded.\n\nPlease pay manually to UPI ID:\n*${upiId}*\n\nAfter paying, type *PAID* to confirm.`
+              `⚠️ QR code could not be loaded.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`
             );
             await incrementStoreMessageUsage(storeId, "outgoing");
           }
@@ -633,7 +769,6 @@ app.post("/whatsapp", async (req, res) => {
         return;
       }
 
-      // ✅ Invalid selection
       await incrementStoreMessageUsage(storeId, "outgoing");
       twiml.message(`⚠️ Invalid selection.\n\n` + buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName));
       return sendTwiml(res, twiml);
@@ -658,7 +793,8 @@ app.post("/whatsapp", async (req, res) => {
           `⏳ *Waiting for your payment*\n\n` +
           `Please complete payment of *₹${orderTotal}*\n` +
           `to UPI ID: *${upiId}*\n\n` +
-          `After paying, type *PAID* to confirm.`
+          `After paying, type *PAID* to confirm.\n` +
+          `Or type *CANCEL* to cancel this order.`
         );
         return sendTwiml(res, twiml);
       }
