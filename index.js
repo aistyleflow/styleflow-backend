@@ -128,7 +128,6 @@ async function incrementStoreMessageUsage(storeId, direction) {
       };
       if (direction === "incoming") updates.incoming_count = (existing.incoming_count || 0) + 1;
       else if (direction === "outgoing") updates.outgoing_count = (existing.outgoing_count || 0) + 1;
-
       await supabase.from("store_message_usage").update(updates).eq("store_id", storeId);
     } else {
       await supabase.from("store_message_usage").insert({
@@ -146,15 +145,24 @@ async function incrementStoreMessageUsage(storeId, direction) {
   }
 }
 
-// ✅ FIXED — fetch payment settings from shop_owners (not a separate table)
+// ✅ CHANGE 1 — Read from store_payment_settings table with .eq("store_id", storeId)
 async function getPaymentSettings(storeId) {
   if (!storeId) return null;
-  const { data } = await supabase
-    .from("shop_owners")
+
+  console.log(`💳 Fetching payment settings for store_id: ${storeId}`);
+
+  const { data, error } = await supabase
+    .from("store_payment_settings")
     .select("cod_enabled, upi_enabled, upi_id, qr_code_url, minimum_cod_amount, default_payment, payment_instructions")
-    .eq("id", storeId)
+    .eq("store_id", storeId)
     .maybeSingle();
-  console.log(`💳 Payment settings for store ${storeId}:`, JSON.stringify(data));
+
+  if (error) {
+    console.error("❌ getPaymentSettings error:", error.message);
+    return null;
+  }
+
+  console.log(`💳 Payment settings found:`, JSON.stringify(data));
   return data || null;
 }
 
@@ -257,9 +265,9 @@ app.get("/whatsapp", (req, res) => {
 
 async function isImageAccessible(url) {
   try {
-    console.log("🔎 Checking image accessibility:", url);
+    console.log("🔎 Checking image URL:", url);
     const response = await fetch(url, { method: "HEAD" });
-    console.log(`🔎 Image check result: ${response.status} ${response.ok ? '✅' : '❌'}`);
+    console.log(`🔎 Image check: ${response.status} ${response.ok ? '✅ accessible' : '❌ not accessible'}`);
     return response.ok;
   } catch (err) {
     console.error("❌ Image accessibility check failed:", err.message);
@@ -278,55 +286,6 @@ async function sendWhatsAppMessage(to, messageBody) {
     return true;
   } catch (err) {
     console.error("❌ REST API send error:", err.message);
-    return false;
-  }
-}
-
-// ✅ FIXED — dedicated function to send QR code with proper logging
-async function sendQrCode(phone, qrCodeUrl, orderTotal, storeId) {
-  try {
-    console.log("📷 Attempting QR code send...");
-    console.log("📷 QR URL:", qrCodeUrl);
-
-    if (!qrCodeUrl) {
-      console.log("⚠️ No QR code URL — skipping");
-      return false;
-    }
-
-    const accessible = await isImageAccessible(qrCodeUrl);
-    if (!accessible) {
-      console.log("❌ QR URL not accessible — skipping QR send");
-      await sendWhatsAppMessage(
-        phone,
-        `⚠️ QR code could not be loaded.\n\nPlease use the UPI ID above to pay ₹${orderTotal} manually.\n\nAfter paying, type *PAID* to confirm.`
-      );
-      await incrementStoreMessageUsage(storeId, "outgoing");
-      return false;
-    }
-
-    console.log("✅ QR URL accessible — sending via Twilio media...");
-
-    const mediaMessage = await client.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: phone,
-      body: `📷 *Scan this QR Code to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`,
-      mediaUrl: [qrCodeUrl]
-    });
-
-    console.log("✅ QR code sent — SID:", mediaMessage.sid);
-    await incrementStoreMessageUsage(storeId, "outgoing");
-    return true;
-
-  } catch (err) {
-    console.error("❌ QR code send failed:", err.message);
-    console.error("❌ QR error details:", err);
-
-    // ✅ Fallback message if QR fails
-    await sendWhatsAppMessage(
-      phone,
-      `⚠️ QR code could not be sent.\n\nPlease use the UPI ID above to pay ₹${orderTotal} manually.\n\nAfter paying, type *PAID* to confirm.`
-    );
-    await incrementStoreMessageUsage(storeId, "outgoing");
     return false;
   }
 }
@@ -474,7 +433,6 @@ app.post("/whatsapp", async (req, res) => {
     const sessionStoreId = session?.store_id || null;
     const activeStoreId = sessionStoreId || session?.pending_store_id || null;
 
-    // ✅ Count incoming message
     if (activeStoreId) {
       await incrementStoreMessageUsage(activeStoreId, "incoming");
     }
@@ -552,8 +510,7 @@ app.post("/whatsapp", async (req, res) => {
       const paymentSettings = await getPaymentSettings(storeId);
 
       console.log("💳 Payment step — storeId:", storeId, "orderTotal:", orderTotal);
-      console.log("💳 codEnabled:", paymentSettings?.cod_enabled, "upiEnabled:", paymentSettings?.upi_enabled);
-      console.log("💳 upiId:", paymentSettings?.upi_id, "qrCodeUrl:", paymentSettings?.qr_code_url);
+      console.log("💳 paymentSettings:", JSON.stringify(paymentSettings));
 
       const codEnabled = paymentSettings?.cod_enabled !== false;
       const upiEnabled = paymentSettings?.upi_enabled !== false;
@@ -578,7 +535,7 @@ app.post("/whatsapp", async (req, res) => {
         return;
       }
 
-      // ✅ UPI selected — FIXED with proper logging and QR handling
+      // ✅ CHANGE 2 — UPI selected with proper QR sending and logs
       if (msg === "2" || msgUpper === "UPI" || msgUpper === "PAY WITH UPI") {
         if (!upiEnabled) {
           await incrementStoreMessageUsage(storeId, "outgoing");
@@ -590,19 +547,22 @@ app.post("/whatsapp", async (req, res) => {
         const qrCodeUrl = paymentSettings?.qr_code_url;
         const instructions = paymentSettings?.payment_instructions;
 
-        console.log("📱 UPI selected — upiId:", upiId);
-        console.log("📷 QR code URL:", qrCodeUrl || "NOT SET");
+        // ✅ Logs for debugging
+        console.log("📱 UPI selected");
+        console.log("📱 upi_id:", upiId || "NOT SET");
+        console.log("📷 qr_code_url:", qrCodeUrl || "NOT SET");
+        console.log("ℹ️ payment_instructions:", instructions || "NOT SET");
 
         if (!upiId) {
           await incrementStoreMessageUsage(storeId, "outgoing");
           twiml.message(
-            `⚠️ UPI payment is not configured yet for this store.\n\n` +
+            `⚠️ UPI payment is not configured for this store.\n\n` +
             `Please type *1* for Cash on Delivery or contact *${shopName}*.`
           );
           return sendTwiml(res, twiml);
         }
 
-        // ✅ Save session — awaiting_payment
+        // ✅ Save session as awaiting_payment
         await supabase
           .from("user_sessions")
           .update({
@@ -624,20 +584,50 @@ app.post("/whatsapp", async (req, res) => {
 
         upiMsg +=
           `─────────────────\n` +
-          `After completing payment,\n` +
-          `type *PAID* to confirm. ✅\n\n` +
-          `_Your order will be created after you type PAID_`;
+          `After paying, type *PAID* to confirm ✅`;
 
-        // ✅ Send UPI instruction via TwiML
+        // ✅ Send UPI text message via TwiML
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(upiMsg);
         sendTwiml(res, twiml);
 
         // ✅ Send QR code separately via REST API
         if (qrCodeUrl) {
-          await sendQrCode(phone, qrCodeUrl, orderTotal, storeId);
+          console.log("📷 QR code URL found — attempting to send...");
+
+          const accessible = await isImageAccessible(qrCodeUrl);
+
+          if (accessible) {
+            console.log("✅ QR URL accessible — sending via Twilio media...");
+            try {
+              const qrMessage = await client.messages.create({
+                from: process.env.TWILIO_WHATSAPP_NUMBER,
+                to: phone,
+                body: `📷 *Scan to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`,
+                mediaUrl: [qrCodeUrl]
+              });
+              console.log("✅ QR sent — SID:", qrMessage.sid);
+              await incrementStoreMessageUsage(storeId, "outgoing");
+            } catch (qrErr) {
+              console.error("❌ QR send failed:", qrErr.message);
+              console.error("❌ QR error details:", JSON.stringify(qrErr));
+              // ✅ Fallback text if QR fails
+              await sendWhatsAppMessage(
+                phone,
+                `⚠️ QR code could not be sent.\n\nPlease use the UPI ID above to pay manually:\n*${upiId}*\n\nAfter paying, type *PAID* to confirm.`
+              );
+              await incrementStoreMessageUsage(storeId, "outgoing");
+            }
+          } else {
+            console.log("❌ QR URL not accessible — sending fallback text");
+            await sendWhatsAppMessage(
+              phone,
+              `⚠️ QR code could not be loaded.\n\nPlease pay manually to UPI ID:\n*${upiId}*\n\nAfter paying, type *PAID* to confirm.`
+            );
+            await incrementStoreMessageUsage(storeId, "outgoing");
+          }
         } else {
-          console.log("⚠️ No QR code URL configured for this store");
+          console.log("⚠️ No QR code URL configured for store:", storeId);
         }
 
         return;
@@ -655,28 +645,20 @@ app.post("/whatsapp", async (req, res) => {
       const orderTotal = session.pending_order_total || 0;
 
       if (msgUpper === "PAID" || msgUpper === "I'VE PAID" || msgUpper === "DONE") {
-        console.log("✅ Customer confirmed payment — creating order as awaiting_verification");
-
+        console.log("✅ Customer confirmed PAID — creating order as awaiting_verification");
         const shopName = await getShopName(storeId);
-        // ✅ Create order with payment_status = awaiting_verification
-        // Customer cannot self-confirm — store owner must verify from dashboard
         await placeOrder(phone, session, storeId, orderTotal, shopName, "UPI", "awaiting_verification", res, twiml);
         return;
-
       } else {
-        // ✅ Customer sent something else while in awaiting_payment — remind them
         const paymentSettings = await getPaymentSettings(storeId);
         const upiId = paymentSettings?.upi_id || 'N/A';
-
-        console.log("⏳ Awaiting payment — customer sent:", msg);
 
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(
           `⏳ *Waiting for your payment*\n\n` +
           `Please complete payment of *₹${orderTotal}*\n` +
           `to UPI ID: *${upiId}*\n\n` +
-          `After paying, type *PAID* to confirm.\n\n` +
-          `_If you want to cancel, type CANCEL_`
+          `After paying, type *PAID* to confirm.`
         );
         return sendTwiml(res, twiml);
       }
@@ -1444,7 +1426,6 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
       storeOrderNumber = (count || 0) + 1;
     }
 
-    // ✅ Create order with correct payment_method and payment_status
     const { data: order, error: orderError } = await supabase
       .from("orders")
       .insert({
@@ -1455,7 +1436,7 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
         store_id: storeId,
         store_order_number: storeOrderNumber,
         payment_method: paymentMethod,
-        payment_status: paymentStatus,   // ✅ "pending" for COD, "awaiting_verification" for UPI
+        payment_status: paymentStatus,
         payment_amount: orderTotal,
         created_at: new Date().toISOString()
       })
@@ -1509,12 +1490,8 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
       formatDate(new Date().toISOString())
     );
 
-    // ✅ Append correct payment status message
     if (paymentMethod === "COD") {
-      orderMsg +=
-        `\n\n💵 *Payment Method:* Cash on Delivery\n` +
-        `💳 *Payment Status:* Pending\n\n` +
-        `Pay when your order arrives.`;
+      orderMsg += `\n\n💵 *Payment Method:* Cash on Delivery\n💳 *Payment Status:* Pending`;
     } else if (paymentMethod === "UPI" && paymentStatus === "awaiting_verification") {
       orderMsg +=
         `\n\n📱 *Payment Method:* UPI\n` +
@@ -1527,7 +1504,6 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
     twiml.message(orderMsg);
     sendTwiml(res, twiml);
 
-    // ✅ Notify store owner for UPI verification
     if (paymentMethod === "UPI" && paymentStatus === "awaiting_verification") {
       const { data: storeOwner } = await supabase
         .from("shop_owners")
@@ -1544,7 +1520,7 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
           `👤 Customer: ${session.customer_name}\n` +
           `📱 Phone: ${phone}\n` +
           `💰 Amount: ₹${orderTotal}\n\n` +
-          `Please verify payment in your UPI app and update the order status in your dashboard.`
+          `Please verify payment in your UPI app and update order status in dashboard.`
         );
       }
     }
