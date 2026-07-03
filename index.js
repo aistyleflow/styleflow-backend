@@ -8,7 +8,6 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-// ✅ CORS FIX
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
@@ -242,20 +241,17 @@ async function getOrderItems(orderId) {
   }
 }
 
-// ✅ HELPER 1 — check if customer is in an active unfinished order flow
+// ✅ Helper 1 — check if customer is in active unfinished order flow
 function isInActiveOrderFlow(session) {
   if (!session) return false;
   const activeSteps = ["name", "address", "pincode", "payment", "awaiting_payment", "saved_address_choice", "size"];
   return activeSteps.includes(session.checkout_step);
 }
 
-// ✅ HELPER 2 — clear full order session + cart
+// ✅ Helper 2 — clear full order session + cart
 async function clearOrderSession(phone) {
   try {
-    // ✅ Clear cart
     await supabase.from("cart").delete().eq("phone_number", phone);
-
-    // ✅ Reset all checkout/order session fields — keep store_id so customer stays in store
     await supabase
       .from("user_sessions")
       .update({
@@ -270,14 +266,13 @@ async function clearOrderSession(phone) {
         saved_address_data: null
       })
       .eq("phone_number", phone);
-
     console.log("✅ Order session cleared for:", phone);
   } catch (err) {
     console.error("❌ clearOrderSession error:", err.message);
   }
 }
 
-// ✅ HELPER 3 — get last placed order + store phone number
+// ✅ Helper 3 — get last placed order
 async function getLastPlacedOrder(phone, storeId) {
   try {
     let query = supabase
@@ -286,9 +281,7 @@ async function getLastPlacedOrder(phone, storeId) {
       .eq("phone_number", phone)
       .order("id", { ascending: false })
       .limit(1);
-
     if (storeId) query = query.eq("store_id", storeId);
-
     const { data: orders } = await query;
     return orders && orders.length > 0 ? orders[0] : null;
   } catch (err) {
@@ -297,7 +290,7 @@ async function getLastPlacedOrder(phone, storeId) {
   }
 }
 
-// ✅ Get store owner phone number
+// ✅ Helper 4 — get store owner phone
 async function getStorePhone(storeId) {
   if (!storeId) return null;
   try {
@@ -503,13 +496,12 @@ app.post("/whatsapp", async (req, res) => {
       await incrementStoreMessageUsage(activeStoreId, "incoming");
     }
 
-    // ✅ CANCEL COMMAND — handle early before all other logic
+    // ✅ CANCEL COMMAND
     if (msgLower === "cancel") {
       console.log("🚫 CANCEL command received");
 
-      // ✅ Case A — customer is in active unfinished order flow
       if (isInActiveOrderFlow(session)) {
-        console.log("🚫 Active order flow detected — clearing session");
+        console.log("🚫 Active order flow — clearing session");
         await clearOrderSession(phone);
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
         twiml.message(
@@ -520,11 +512,9 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Case B — check if order already placed
       const lastOrder = await getLastPlacedOrder(phone, activeStoreId);
 
       if (lastOrder && ['pending', 'confirmed', 'shipped'].includes(lastOrder.status)) {
-        console.log("🚫 Order already placed — showing store contact");
         const storeInfo = await getStorePhone(lastOrder.store_id);
         const storePhone = storeInfo?.phone_number || null;
         const storeName = storeInfo?.shop_name || "the store";
@@ -540,7 +530,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Case C — no active order and no recent placed order
       await incrementStoreMessageUsage(activeStoreId, "outgoing");
       twiml.message(
         `ℹ️ There's no active order to cancel right now.\n\n` +
@@ -549,7 +538,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ CLEAR CART COMMAND — handle early before all other logic
+    // ✅ CLEAR CART COMMAND
     if (msgLower === "clear cart" || msgUpper === "CLEAR CART") {
       console.log("🛒 CLEAR CART command received");
 
@@ -565,16 +554,10 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Clear only cart — keep store session active
       await supabase.from("cart").delete().eq("phone_number", phone);
-
-      // ✅ Also reset product selection but keep store_id
       await supabase
         .from("user_sessions")
-        .update({
-          selected_product_id: null,
-          action_step: null
-        })
+        .update({ selected_product_id: null, action_step: null })
         .eq("phone_number", phone);
 
       await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -710,10 +693,7 @@ app.post("/whatsapp", async (req, res) => {
 
         await supabase
           .from("user_sessions")
-          .update({
-            checkout_step: "awaiting_payment",
-            payment_method: "UPI"
-          })
+          .update({ checkout_step: "awaiting_payment", payment_method: "UPI" })
           .eq("phone_number", phone);
 
         let upiMsg =
@@ -748,16 +728,14 @@ app.post("/whatsapp", async (req, res) => {
               await incrementStoreMessageUsage(storeId, "outgoing");
             } catch (qrErr) {
               console.error("❌ QR send failed:", qrErr.message);
-              await sendWhatsAppMessage(
-                phone,
+              await sendWhatsAppMessage(phone,
                 `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`
               );
               await incrementStoreMessageUsage(storeId, "outgoing");
             }
           } else {
             console.log("❌ QR URL not accessible — sending fallback");
-            await sendWhatsAppMessage(
-              phone,
+            await sendWhatsAppMessage(phone,
               `⚠️ QR code could not be loaded.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`
             );
             await incrementStoreMessageUsage(storeId, "outgoing");
@@ -1080,7 +1058,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 11. ORDER HISTORY
+    // ✅ 11. ORDER HISTORY — fixed totalSpent calculation
     if (msgUpper === "ORDER HISTORY" || msgUpper === "MY ORDERS" || msgUpper === "HISTORY") {
       const { data: orders } = await supabase
         .from("orders")
@@ -1098,15 +1076,30 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
+      // ✅ Calculate totalSpent — only delivered orders using payment_amount
+      const deliveredOrders = orders.filter(
+        o => o.status && o.status.toLowerCase() === "delivered"
+      );
+
+      const totalSpent = deliveredOrders.reduce(
+        (sum, o) => sum + Number(o.payment_amount || 0),
+        0
+      );
+
+      console.log(`💰 Total spent (delivered only): ₹${totalSpent} from ${deliveredOrders.length} delivered orders`);
+
       res.status(200).end();
 
       const historyStoreId = orders[0]?.store_id || activeStoreId;
 
+      // ✅ Send header with total spent
       await incrementStoreMessageUsage(historyStoreId, "outgoing");
       await sendWhatsAppMessage(
         phone,
         `📋 *Your Order History*\n` +
         `(${orders.length} order${orders.length > 1 ? 's' : ''})\n\n` +
+        `💰 *Total Spent: ₹${totalSpent}*\n` +
+        `_(from ${deliveredOrders.length} delivered order${deliveredOrders.length !== 1 ? 's' : ''})_\n\n` +
         `─────────────────`
       );
 
@@ -1542,7 +1535,6 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ✅ Shared order placement function
 async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
   try {
     const { data: cartItems } = await supabase
@@ -1668,7 +1660,6 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
   }
 }
 
-// ✅ Update order status + send WhatsApp notification
 app.post("/update-status", async (req, res) => {
   try {
     const { orderId, newStatus } = req.body;
@@ -1717,7 +1708,6 @@ app.post("/update-status", async (req, res) => {
   }
 });
 
-// ✅ Send Offer to customers
 app.post("/send-offer", async (req, res) => {
   try {
     const { storeId, title, description, couponCode, imageUrl, audience, customPhones } = req.body;
