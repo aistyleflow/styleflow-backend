@@ -240,13 +240,9 @@ async function getOrderItems(orderId) {
 function isInActiveOrderFlow(session) {
   if (!session) return false;
   const activeSteps = [
-    "name_phone",
-    "address_pincode",
-    "payment",
-    "awaiting_payment",
-    "saved_address_choice",
-    "size",
-    // ✅ keep old steps too in case any session has them
+    "name_phone", "address_pincode",
+    "payment", "awaiting_payment",
+    "saved_address_choice", "size",
     "name", "address", "pincode"
   ];
   return activeSteps.includes(session.checkout_step);
@@ -708,18 +704,14 @@ app.post("/whatsapp", async (req, res) => {
       }
     }
 
-    // ✅ 5. NEW CHECKOUT STEP — NAME + PHONE in one message
+    // ✅ 5. CHECKOUT STEP — NAME + PHONE
     if (session?.checkout_step === "name_phone") {
       console.log("📝 name_phone step:", msg);
 
       const trimmed = msg.trim();
-
-      // ✅ Extract last word as phone — clean non-digits
       const parts = trimmed.split(/\s+/);
       const lastPart = parts[parts.length - 1];
       const phoneDigits = lastPart.replace(/\D/g, '');
-
-      // ✅ Validate phone — must be 10 digits (Indian) or 10-15 digits internationally
       const isValidPhone = phoneDigits.length >= 10 && phoneDigits.length <= 15;
       const customerName = parts.slice(0, parts.length - 1).join(' ').trim();
 
@@ -733,9 +725,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      console.log(`✅ Name: ${customerName} | Phone: ${phoneDigits}`);
-
-      // ✅ Save name + phone to session, move to address_pincode step
       await supabase
         .from("user_sessions")
         .update({
@@ -755,13 +744,11 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 6. NEW CHECKOUT STEP — ADDRESS + PINCODE in one message
+    // ✅ 6. CHECKOUT STEP — ADDRESS + PINCODE
     if (session?.checkout_step === "address_pincode") {
       console.log("📍 address_pincode step:", msg);
 
       const trimmed = msg.trim();
-
-      // ✅ Extract last 6-digit number as pincode
       const pincodeMatch = trimmed.match(/\b(\d{6})\b/);
 
       if (!pincodeMatch) {
@@ -775,7 +762,6 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       const pincode = pincodeMatch[1];
-      // ✅ Remove pincode from message to get address
       const address = trimmed.replace(pincodeMatch[0], '').replace(/,\s*$/, '').trim();
 
       if (!address) {
@@ -788,9 +774,7 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       const fullAddress = `${address}, ${pincode}`;
-      console.log(`✅ Address: ${address} | Pincode: ${pincode}`);
 
-      // ✅ Get cart items
       const { data: cartItems } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
 
@@ -801,7 +785,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Get storeId
       let storeId = sessionStoreId;
       if (!storeId) {
         const { data: firstProduct } = await supabase
@@ -810,7 +793,6 @@ app.post("/whatsapp", async (req, res) => {
         if (firstProduct?.store_id) storeId = firstProduct.store_id;
       }
 
-      // ✅ Calculate order total
       let orderTotal = 0;
       for (const item of cartItems) {
         const { data: product } = await supabase
@@ -822,11 +804,11 @@ app.post("/whatsapp", async (req, res) => {
       const shopName = await getShopName(storeId);
       const paymentSettings = await getPaymentSettings(storeId);
 
-      // ✅ Save address + pincode to session, move to payment step
       await supabase
         .from("user_sessions")
         .update({
           customer_address: fullAddress,
+          customer_pincode: pincode,
           checkout_step: "payment",
           pending_store_id: storeId,
           pending_order_total: orderTotal
@@ -904,7 +886,6 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       if (msg === "2" || msgUpper === "ADD NEW ADDRESS" || msgUpper === "NEW ADDRESS") {
-        // ✅ Go to new 2-step flow
         await supabase.from("user_sessions").update({ checkout_step: "name_phone" }).eq("phone_number", phone);
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.message(
@@ -1267,7 +1248,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ No saved address — go to new 2-step flow
       await supabase
         .from("user_sessions")
         .update({ checkout_step: "name_phone", action_step: null })
@@ -1391,7 +1371,6 @@ app.post("/whatsapp", async (req, res) => {
           return sendTwiml(res, twiml);
         }
 
-        // ✅ Use new 2-step flow
         await supabase.from("user_sessions")
           .update({ checkout_step: "name_phone", action_step: null })
           .eq("phone_number", phone);
@@ -1446,7 +1425,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 16. SEARCH
+    // ✅ 16. SEARCH — Fix 3: no stock filter, correct store filter for new products
     console.log(`🔍 Searching: "${msg}" — store_id: ${sessionStoreId || 'all'}`);
 
     let searchQuery = supabase
@@ -1454,6 +1433,7 @@ app.post("/whatsapp", async (req, res) => {
       .select("*")
       .or(`product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`);
 
+    // ✅ Filter by store only — no stock filter so new products always appear
     if (sessionStoreId) {
       searchQuery = searchQuery.eq("store_id", sessionStoreId);
     }
@@ -1495,7 +1475,7 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ✅ Shared order placement function — saves all 4 customer fields
+// ✅ Shared order placement — Fix 2: size saved in order_items
 async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
   try {
     const { data: cartItems } = await supabase
@@ -1515,18 +1495,17 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
       storeOrderNumber = (count || 0) + 1;
     }
 
-    // ✅ Extract pincode from address if present
     const addressStr = session.customer_address || '';
-    const pincodeFromAddress = (addressStr.match(/\b(\d{6})\b/) || [])[1] || null;
+    const pincodeFromAddress = session.customer_pincode || (addressStr.match(/\b(\d{6})\b/) || [])[1] || null;
 
     const { data: order, error: orderError } = await supabase
       .from("orders")
       .insert({
         phone_number: phone,
         customer_name: session.customer_name,
-        customer_phone: session.customer_phone || null,   // ✅ typed phone
+        customer_phone: session.customer_phone || null,
         customer_address: session.customer_address,
-        customer_pincode: pincodeFromAddress,             // ✅ extracted pincode
+        customer_pincode: pincodeFromAddress,
         status: "pending",
         store_id: storeId,
         store_order_number: storeOrderNumber,
@@ -1553,10 +1532,12 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
         .eq("id", item.product_id).maybeSingle();
 
       if (product) {
+        // ✅ Fix 2 — save size into order_items
         await supabase.from("order_items").insert({
           order_id: order.id,
           product_id: item.product_id,
-          quantity: item.quantity
+          quantity: item.quantity,
+          size: item.size || null
         });
         const itemTotal = product.price * item.quantity;
         orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
@@ -1625,39 +1606,92 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
   }
 }
 
+// ✅ Fix 1 — /update-status: fixed 500, same-status protection, proper try/catch
 app.post("/update-status", async (req, res) => {
   try {
     const { orderId, newStatus } = req.body;
-    if (!orderId || !newStatus) return res.status(400).json({ error: "orderId and newStatus required" });
 
-    const { error: updateError } = await supabase
-      .from("orders").update({ status: newStatus }).eq("id", orderId);
-    if (updateError) return res.status(500).json({ error: updateError.message });
-
-    const { data: order } = await supabase.from("orders").select("*").eq("id", orderId).single();
-    if (!order) return res.status(200).json({ success: true });
-
-    const shopName = await getShopName(order.store_id);
-    const orderNum = order.store_order_number || order.id;
-    const customerPhone = order.phone_number;
-
-    if (newStatus === "confirmed") {
-      await incrementStoreMessageUsage(order.store_id, "outgoing");
-      await sendWhatsAppMessage(customerPhone, messages.orderConfirmed(shopName, orderNum));
-    } else if (newStatus === "shipped") {
-      await incrementStoreMessageUsage(order.store_id, "outgoing");
-      await sendWhatsAppMessage(customerPhone, messages.orderShipped(shopName, orderNum));
-    } else if (newStatus === "delivered") {
-      await incrementStoreMessageUsage(order.store_id, "outgoing");
-      await sendWhatsAppMessage(customerPhone, messages.orderDelivered(shopName, orderNum));
-    } else if (newStatus === "cancelled") {
-      await incrementStoreMessageUsage(order.store_id, "outgoing");
-      await sendWhatsAppMessage(customerPhone, messages.orderCancelled(shopName, orderNum));
+    // ✅ Validate inputs
+    if (!orderId || !newStatus) {
+      return res.status(400).json({ error: "orderId and newStatus required" });
     }
 
+    const allowedStatuses = ['pending', 'confirmed', 'shipped', 'delivered', 'cancelled'];
+    if (!allowedStatuses.includes(newStatus)) {
+      return res.status(400).json({ error: `Invalid status: ${newStatus}` });
+    }
+
+    // ✅ Fetch current order first
+    let currentOrder = null;
+    try {
+      const { data, error } = await supabase
+        .from("orders")
+        .select("*")
+        .eq("id", orderId)
+        .single();
+
+      if (error) {
+        console.error("❌ Order fetch failed:", error.message);
+        return res.status(404).json({ error: "Order not found" });
+      }
+      currentOrder = data;
+    } catch (fetchErr) {
+      console.error("❌ Order fetch exception:", fetchErr.message);
+      return res.status(500).json({ error: "Failed to fetch order" });
+    }
+
+    // ✅ Same-status protection — return immediately without sending message
+    if (currentOrder.status === newStatus) {
+      console.log(`⚠️ Order ${orderId} already has status: ${newStatus} — skipping update`);
+      return res.status(200).json({ success: true, skipped: true });
+    }
+
+    // ✅ Update order status in DB
+    try {
+      const { error: updateError } = await supabase
+        .from("orders")
+        .update({ status: newStatus })
+        .eq("id", orderId);
+
+      if (updateError) {
+        console.error("❌ Status DB update failed:", updateError.message);
+        return res.status(500).json({ error: updateError.message });
+      }
+    } catch (updateErr) {
+      console.error("❌ Status update exception:", updateErr.message);
+      return res.status(500).json({ error: "Failed to update status" });
+    }
+
+    // ✅ Send WhatsApp notification — only once, only for new status
+    const shopName = await getShopName(currentOrder.store_id);
+    const orderNum = currentOrder.store_order_number || currentOrder.id;
+    const customerPhone = currentOrder.phone_number;
+
+    try {
+      if (newStatus === "confirmed") {
+        await incrementStoreMessageUsage(currentOrder.store_id, "outgoing");
+        await sendWhatsAppMessage(customerPhone, messages.orderConfirmed(shopName, orderNum));
+      } else if (newStatus === "shipped") {
+        await incrementStoreMessageUsage(currentOrder.store_id, "outgoing");
+        await sendWhatsAppMessage(customerPhone, messages.orderShipped(shopName, orderNum));
+      } else if (newStatus === "delivered") {
+        await incrementStoreMessageUsage(currentOrder.store_id, "outgoing");
+        await sendWhatsAppMessage(customerPhone, messages.orderDelivered(shopName, orderNum));
+      } else if (newStatus === "cancelled") {
+        await incrementStoreMessageUsage(currentOrder.store_id, "outgoing");
+        await sendWhatsAppMessage(customerPhone, messages.orderCancelled(shopName, orderNum));
+      }
+      // ✅ pending — no message needed
+    } catch (msgErr) {
+      // ✅ WhatsApp failure should NOT fail the whole route
+      console.error("❌ WhatsApp send failed (non-fatal):", msgErr.message);
+    }
+
+    console.log(`✅ Order ${orderId} updated: ${currentOrder.status} → ${newStatus}`);
     return res.status(200).json({ success: true });
+
   } catch (err) {
-    console.error("❌ update-status error:", err.message);
+    console.error("❌ /update-status unexpected error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 });
