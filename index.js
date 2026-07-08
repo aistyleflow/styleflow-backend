@@ -1533,12 +1533,16 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
 
       if (product) {
         // ✅ Fix 2 — save size into order_items
-        await supabase.from("order_items").insert({
-          order_id: order.id,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          size: item.size || null
-        });
+        await supabase.from('order_items').insert(
+          cart.map(item => ({
+            order_id: orderData.id,
+            product_id: item.product_id,
+            quantity: item.quantity,
+            size: item.size || null,
+            product_name: item.product_name,
+            price: item.price
+          }))
+        )
         const itemTotal = product.price * item.quantity;
         orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
       }
