@@ -365,8 +365,10 @@ async function sendProductMessage(twiml, product) {
 
 async function saveSession(phone, data) {
   try {
-    // ✅ Fix — always store as an explicit JSON string so read-back is consistent
-    const payload = JSON.stringify(data);
+    // ✅ Fix — store the raw array directly. last_results is a jsonb column,
+    // so Supabase serializes it correctly on write. Stringifying it here was
+    // causing it to come back as a plain string on read, breaking Array.isArray()
+    // checks in the number-selection block.
     const { data: existing } = await supabase
       .from("user_sessions")
       .select("phone_number")
@@ -376,12 +378,12 @@ async function saveSession(phone, data) {
     if (existing) {
       await supabase
         .from("user_sessions")
-        .update({ last_results: payload })
+        .update({ last_results: data })
         .eq("phone_number", phone);
     } else {
       await supabase
         .from("user_sessions")
-        .insert({ phone_number: phone, last_results: payload });
+        .insert({ phone_number: phone, last_results: data });
     }
     return true;
   } catch (err) {
@@ -1399,8 +1401,8 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Fix — last_results may come back as a JSON string depending on column
-      // type / driver behavior; parse defensively so indexing always works
+      // ✅ Fix — last_results is now stored as a real array (jsonb), but keep
+      // this parse fallback for any older sessions that were saved as a string
       let lastResults = session.last_results;
       console.log("🔢 Number selection — raw last_results type:", typeof lastResults, "isArray:", Array.isArray(lastResults));
 
@@ -1408,8 +1410,8 @@ app.post("/whatsapp", async (req, res) => {
         try {
           lastResults = JSON.parse(lastResults);
         } catch (e) {
-          console.error("❌ Failed to parse last_results JSON:", e.message);
-          lastResults = null;
+          console.log("❌ Failed to parse last_results string:", e.message);
+          lastResults = [];
         }
       }
 
