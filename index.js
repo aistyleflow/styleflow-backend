@@ -1430,8 +1430,11 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       const { data: freshProduct, error: freshProductError } = await supabase
-        .from("products").select("*")
-        .eq("id", sessionProduct.id).maybeSingle();
+        .from("products")
+        .select("*")
+        .eq("id", sessionProduct.id)
+        .eq("store_id", sessionStoreId)
+        .maybeSingle();
 
       if (freshProductError) {
         console.error("❌ freshProduct lookup error:", freshProductError.message);
@@ -1453,18 +1456,22 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 16. SEARCH — no stock filter, correct store filter for new products
-    console.log(`🔍 Searching: "${msg}" — store_id: ${sessionStoreId || 'all'}`);
+    // ✅ 16. SEARCH — always scoped to the active store; never falls through
+    // to searching every store's products
+    console.log(`🔍 Searching: "${msg}" — store_id: ${sessionStoreId || 'none'}`);
+
+    if (!sessionStoreId) {
+      await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      twiml.message(`⚠️ Store not selected. Please enter your store code first.`);
+      return sendTwiml(res, twiml);
+    }
 
     let searchQuery = supabase
       .from("products")
       .select("*")
-      .or(`product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%`);
-
-    // ✅ Filter by store only — no stock filter so new products always appear
-    if (sessionStoreId) {
-      searchQuery = searchQuery.eq("store_id", sessionStoreId);
-    }
+      .eq("store_id", sessionStoreId)
+      .or(`product_name.ilike.%${msg}%,category.ilike.%${msg}%,color.ilike.%${msg}%,size.ilike.%${msg}%`)
+      .order("id", { ascending: false });
 
     const { data, error } = await searchQuery;
 
