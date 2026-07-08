@@ -365,6 +365,8 @@ async function sendProductMessage(twiml, product) {
 
 async function saveSession(phone, data) {
   try {
+    // ✅ Fix — always store as an explicit JSON string so read-back is consistent
+    const payload = JSON.stringify(data);
     const { data: existing } = await supabase
       .from("user_sessions")
       .select("phone_number")
@@ -374,12 +376,12 @@ async function saveSession(phone, data) {
     if (existing) {
       await supabase
         .from("user_sessions")
-        .update({ last_results: data })
+        .update({ last_results: payload })
         .eq("phone_number", phone);
     } else {
       await supabase
         .from("user_sessions")
-        .insert({ phone_number: phone, last_results: data });
+        .insert({ phone_number: phone, last_results: payload });
     }
     return true;
   } catch (err) {
@@ -1397,11 +1399,28 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      const sessionProduct = session.last_results[index];
+      // ✅ Fix — last_results may come back as a JSON string depending on column
+      // type / driver behavior; parse defensively so indexing always works
+      let lastResults = session.last_results;
+      if (typeof lastResults === "string") {
+        try {
+          lastResults = JSON.parse(lastResults);
+        } catch (e) {
+          lastResults = null;
+        }
+      }
+
+      if (!Array.isArray(lastResults) || lastResults.length === 0) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Session expired. Please search again!`);
+        return sendTwiml(res, twiml);
+      }
+
+      const sessionProduct = lastResults[index];
 
       if (!sessionProduct) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
-        twiml.message(`⚠️ Invalid selection. Choose between *1* and *${session.last_results.length}*`);
+        twiml.message(`⚠️ Invalid selection. Choose between *1* and *${lastResults.length}*`);
         return sendTwiml(res, twiml);
       }
 
