@@ -1468,14 +1468,18 @@ app.post("/whatsapp", async (req, res) => {
 
     if (data && data.length > 0) {
       await saveSession(phone, data);
-      await supabase.from("user_sessions").update({ action_step: null }).eq("phone_number", phone);
 
       if (data.length === 1) {
+        await supabase.from("user_sessions").update({ action_step: null }).eq("phone_number", phone);
         await saveSelectedProduct(phone, data[0].id);
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
         await incrementStoreMessageUsage(data[0].store_id || activeStoreId, "outgoing");
         await sendProductMessage(twiml, data[0]);
       } else {
+        // ✅ Fix — mark session as being in selection mode so a follow-up
+        // number (e.g. "3") is correctly picked up by the number-check block
+        await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
+
         let response = `🛍️ *Products matching "${msg}"*:\n\n`;
         data.forEach((product, index) => {
           response += `${index + 1}. *${product.product_name}*\n`;
