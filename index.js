@@ -1402,10 +1402,13 @@ app.post("/whatsapp", async (req, res) => {
       // ✅ Fix — last_results may come back as a JSON string depending on column
       // type / driver behavior; parse defensively so indexing always works
       let lastResults = session.last_results;
+      console.log("🔢 Number selection — raw last_results type:", typeof lastResults, "isArray:", Array.isArray(lastResults));
+
       if (typeof lastResults === "string") {
         try {
           lastResults = JSON.parse(lastResults);
         } catch (e) {
+          console.error("❌ Failed to parse last_results JSON:", e.message);
           lastResults = null;
         }
       }
@@ -1418,15 +1421,19 @@ app.post("/whatsapp", async (req, res) => {
 
       const sessionProduct = lastResults[index];
 
-      if (!sessionProduct) {
+      if (!sessionProduct || !sessionProduct.id) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
         twiml.message(`⚠️ Invalid selection. Choose between *1* and *${lastResults.length}*`);
         return sendTwiml(res, twiml);
       }
 
-      const { data: freshProduct } = await supabase
+      const { data: freshProduct, error: freshProductError } = await supabase
         .from("products").select("*")
         .eq("id", sessionProduct.id).maybeSingle();
+
+      if (freshProductError) {
+        console.error("❌ freshProduct lookup error:", freshProductError.message);
+      }
 
       if (!freshProduct) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -1489,8 +1496,15 @@ app.post("/whatsapp", async (req, res) => {
     return sendTwiml(res, twiml);
 
   } catch (error) {
-    console.error("❌ Error:", error.message);
-    res.status(500).end();
+    console.error("❌ Error:", error.stack || error.message);
+    try {
+      const twiml = new twilio.twiml.MessagingResponse();
+      twiml.message(`⚠️ Something went wrong on our end. Please try again in a moment!`);
+      return sendTwiml(res, twiml);
+    } catch (fallbackErr) {
+      console.error("❌ Fallback reply also failed:", fallbackErr.message);
+      return res.status(500).end();
+    }
   }
 });
 
