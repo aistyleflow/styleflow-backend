@@ -1407,7 +1407,7 @@ app.post("/whatsapp", async (req, res) => {
 
       const { data: freshProduct } = await supabase
         .from("products").select("*")
-        .eq("product_name", sessionProduct.product_name).maybeSingle();
+        .eq("id", sessionProduct.id).maybeSingle();
 
       if (!freshProduct) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -1425,7 +1425,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 16. SEARCH — Fix 3: no stock filter, correct store filter for new products
+    // ✅ 16. SEARCH — no stock filter, correct store filter for new products
     console.log(`🔍 Searching: "${msg}" — store_id: ${sessionStoreId || 'all'}`);
 
     let searchQuery = supabase
@@ -1475,7 +1475,8 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ✅ Shared order placement — Fix 2: size saved in order_items
+// ✅ Shared order placement — FIXED: size saved correctly in order_items,
+// no undefined variables (cart/orderData/item.product_name/item.price removed)
 async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
   try {
     const { data: cartItems } = await supabase
@@ -1525,6 +1526,7 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
     }
 
     let orderSummary = "";
+    const orderItemsToInsert = [];
 
     for (const item of cartItems) {
       const { data: product } = await supabase
@@ -1532,19 +1534,23 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
         .eq("id", item.product_id).maybeSingle();
 
       if (product) {
-        // ✅ Fix 2 — save size into order_items
-        await supabase.from('order_items').insert(
-          cart.map(item => ({
-            order_id: orderData.id,
-            product_id: item.product_id,
-            quantity: item.quantity,
-            size: item.size || null,
-            product_name: item.product_name,
-            price: item.price
-          }))
-        )
         const itemTotal = product.price * item.quantity;
         orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
+
+        // ✅ Fix — collect order_items rows using real cart item + product data
+        orderItemsToInsert.push({
+          order_id: order.id,
+          product_id: item.product_id,
+          quantity: item.quantity,
+          size: item.size || null
+        });
+      }
+    }
+
+    if (orderItemsToInsert.length > 0) {
+      const { error: itemsError } = await supabase.from('order_items').insert(orderItemsToInsert);
+      if (itemsError) {
+        console.error("❌ order_items insert error:", itemsError.message);
       }
     }
 
@@ -1610,12 +1616,11 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
   }
 }
 
-// ✅ Fix 1 — /update-status: fixed 500, same-status protection, proper try/catch
+// ✅ /update-status: fixed 500, same-status protection, proper try/catch
 app.post("/update-status", async (req, res) => {
   try {
     const { orderId, newStatus } = req.body;
 
-    // ✅ Validate inputs
     if (!orderId || !newStatus) {
       return res.status(400).json({ error: "orderId and newStatus required" });
     }
@@ -1625,7 +1630,6 @@ app.post("/update-status", async (req, res) => {
       return res.status(400).json({ error: `Invalid status: ${newStatus}` });
     }
 
-    // ✅ Fetch current order first
     let currentOrder = null;
     try {
       const { data, error } = await supabase
@@ -1644,13 +1648,11 @@ app.post("/update-status", async (req, res) => {
       return res.status(500).json({ error: "Failed to fetch order" });
     }
 
-    // ✅ Same-status protection — return immediately without sending message
     if (currentOrder.status === newStatus) {
       console.log(`⚠️ Order ${orderId} already has status: ${newStatus} — skipping update`);
       return res.status(200).json({ success: true, skipped: true });
     }
 
-    // ✅ Update order status in DB
     try {
       const { error: updateError } = await supabase
         .from("orders")
@@ -1666,7 +1668,6 @@ app.post("/update-status", async (req, res) => {
       return res.status(500).json({ error: "Failed to update status" });
     }
 
-    // ✅ Send WhatsApp notification — only once, only for new status
     const shopName = await getShopName(currentOrder.store_id);
     const orderNum = currentOrder.store_order_number || currentOrder.id;
     const customerPhone = currentOrder.phone_number;
@@ -1685,9 +1686,7 @@ app.post("/update-status", async (req, res) => {
         await incrementStoreMessageUsage(currentOrder.store_id, "outgoing");
         await sendWhatsAppMessage(customerPhone, messages.orderCancelled(shopName, orderNum));
       }
-      // ✅ pending — no message needed
     } catch (msgErr) {
-      // ✅ WhatsApp failure should NOT fail the whole route
       console.error("❌ WhatsApp send failed (non-fatal):", msgErr.message);
     }
 
