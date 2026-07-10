@@ -1387,13 +1387,22 @@ app.post("/whatsapp", async (req, res) => {
         );
         return sendTwiml(res, twiml);
       }
+      // ⚠️ IMPORTANT: no `return` here for any other message (e.g. a number like
+      // "2"). Falling through (instead of silently stopping) lets execution
+      // continue down to the number-selection block (15) below, which is what
+      // actually handles numeric picks after a multi-result search.
     }
 
-    // ✅ 15. NUMBER CHECK
+    // ✅ 15. NUMBER CHECK — hardened per diagnosis:
+    //    - explicit selectedIndex parsing (not reliance on raw `msg`)
+    //    - validates lastResults defensively (array + string fallback)
+    //    - validates the index range with a clear message
+    //    - fetches the fresh product by id + store_id (not by name)
+    //    - always ends in saveSelectedProduct + twiml.message + sendTwiml
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
-      const index = parseInt(msg) - 1;
+      const selectedIndex = parseInt(msg.trim(), 10) - 1;
 
       if (!session || !session.last_results) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -1401,10 +1410,11 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Fix — last_results is now stored as a real array (jsonb), but keep
-      // this parse fallback for any older sessions that were saved as a string
+      // last_results is normally a real array (jsonb), but keep a string
+      // fallback for any older/legacy sessions.
       let lastResults = session.last_results;
       console.log("🔢 Number selection — raw last_results type:", typeof lastResults, "isArray:", Array.isArray(lastResults));
+      console.log("🔢 selectedNumber (raw msg):", msg, "→ selectedIndex:", selectedIndex);
 
       if (typeof lastResults === "string") {
         try {
@@ -1421,7 +1431,16 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      const sessionProduct = lastResults[index];
+      console.log("🔢 lastResults.length:", lastResults.length);
+
+      if (isNaN(selectedIndex) || selectedIndex < 0 || selectedIndex >= lastResults.length) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Invalid selection. Choose between *1* and *${lastResults.length}*`);
+        return sendTwiml(res, twiml);
+      }
+
+      const sessionProduct = lastResults[selectedIndex];
+      console.log("✅ Selected product from lastResults:", sessionProduct);
 
       if (!sessionProduct || !sessionProduct.id) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -1436,6 +1455,8 @@ app.post("/whatsapp", async (req, res) => {
         .eq("store_id", sessionStoreId)
         .maybeSingle();
 
+      console.log("freshProduct:", freshProduct, "freshProductError:", freshProductError?.message || null);
+
       if (freshProductError) {
         console.error("❌ freshProduct lookup error:", freshProductError.message);
       }
@@ -1446,6 +1467,8 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
+      // 1. persist selection, 2. move session forward, 3. reply — all three,
+      // every time, so a numeric pick never results in silence.
       await saveSelectedProduct(phone, freshProduct.id);
       await supabase.from("user_sessions")
         .update({ action_step: "product_action" })
