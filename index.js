@@ -774,7 +774,7 @@ app.post("/whatsapp", async (req, res) => {
       const trimmed = msg.trim();
       const pincodeMatch = trimmed.match(/\b(\d{6})\b/);
 
-      if (!pincodeMatch) {
+      if (!pincodeMatch || trimmed.length < 10) {
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.message(
           `⚠️ Please include a valid *6-digit pincode* in your message.\n\n` +
@@ -1502,8 +1502,7 @@ app.post("/whatsapp", async (req, res) => {
         .from("user_sessions")
         .update({
           action_step: "product_action",
-          last_results: null,
-          last_search_query: null
+          last_results: null
         })
         .eq("phone_number", phone);
       if (actionStepError) {
