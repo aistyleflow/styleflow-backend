@@ -773,108 +773,55 @@ app.post("/whatsapp", async (req, res) => {
 
       const trimmed = msg.trim();
 
-      // ✅ ROOT-CAUSE FIX v2: don't rely on the stale in-memory `session`
-      // object's fields at all (they can be equally stale/unpopulated if
-      // this request raced the one that wrote the address). Any time the
-      // step is "address_pincode" but the message is a bare "1"/"2" (never
-      // a valid address+pincode), ALWAYS re-read the live DB row first,
-      // before doing any address-format validation.
+      // ✅ ROOT-CAUSE FIX v3: a bare "1"/"2" while stuck at address_pincode
+      // with no customer_address/pending_order_total saved means this
+      // session never actually completed the address step (often left over
+      // from an abandoned/interrupted earlier checkout). There is no
+      // "payment" step to jump to. Instead, check whether this customer has
+      // a saved address on file and recover them into the normal
+      // saved-address-choice flow so they aren't stuck re-typing forever.
       if (msg === "1" || msg === "2") {
-        console.log("♻️ Bare digit received during address_pincode step — re-fetching live session for", phone);
+        console.log("♻️ Bare digit received during address_pincode step — checking for recovery path for", phone);
 
-        const { data: liveSession, error: liveSessionError } = await supabase
-          .from("user_sessions")
-          .select("*")
-          .eq("phone_number", phone)
-          .maybeSingle();
+        if (!session.customer_address && !session.pending_order_total) {
+          const recoveryStoreId = sessionStoreId || session.pending_store_id;
+          const savedAddress = await getSavedAddress(phone, recoveryStoreId);
+          console.log("♻️ savedAddress found for recovery:", savedAddress);
 
-        console.log("♻️ liveSession.checkout_step:", liveSession?.checkout_step, "error:", liveSessionError);
-
-        if (liveSession?.checkout_step === "payment") {
-          const storeId = liveSession.pending_store_id || sessionStoreId;
-          const orderTotal = liveSession.pending_order_total || 0;
-          const shopName = await getShopName(storeId);
-          const paymentSettings = await getPaymentSettings(storeId);
-
-          const codEnabled = paymentSettings?.cod_enabled !== false;
-          const upiEnabled = paymentSettings?.upi_enabled !== false;
-          const minCod = paymentSettings?.minimum_cod_amount || 0;
-
-          if (msg === "1") {
-            if (!codEnabled) {
-              await incrementStoreMessageUsage(storeId, "outgoing");
-              twiml.message(`⚠️ Cash on Delivery is not available.\n\nPlease type *2* to pay with UPI.`);
-              return sendTwiml(res, twiml);
-            }
-            if (minCod > 0 && orderTotal < minCod) {
-              await incrementStoreMessageUsage(storeId, "outgoing");
-              twiml.message(`⚠️ COD requires minimum order of ₹${minCod}.\n\nYour order total is ₹${orderTotal}.\n\nPlease type *2* to pay with UPI.`);
-              return sendTwiml(res, twiml);
-            }
-            await placeOrder(phone, liveSession, storeId, orderTotal, shopName, "COD", "pending", res, twiml);
-            return;
-          }
-
-          if (msg === "2") {
-            if (!upiEnabled) {
-              await incrementStoreMessageUsage(storeId, "outgoing");
-              twiml.message(`⚠️ UPI payment is not available.\n\nPlease type *1* to use Cash on Delivery.`);
-              return sendTwiml(res, twiml);
-            }
-            const upiId = paymentSettings?.upi_id;
-            if (!upiId) {
-              await incrementStoreMessageUsage(storeId, "outgoing");
-              twiml.message(`⚠️ UPI payment is not configured for this store.\n\nPlease type *1* for Cash on Delivery or contact *${shopName}*.`);
-              return sendTwiml(res, twiml);
-            }
-
+          if (savedAddress) {
             await supabase
               .from("user_sessions")
-              .update({ checkout_step: "awaiting_payment", payment_method: "UPI" })
+              .update({
+                checkout_step: "saved_address_choice",
+                action_step: null,
+                saved_address_data: JSON.stringify(savedAddress)
+              })
               .eq("phone_number", phone);
 
-            const qrCodeUrl = paymentSettings?.qr_code_url;
-            const instructions = paymentSettings?.payment_instructions;
-
-            let upiMsg =
-              `📱 *Pay with UPI*\n\n` +
-              `🧾 Amount: *₹${orderTotal}*\n\n` +
-              `🏪 Pay to: *${shopName}*\n` +
-              `📲 UPI ID: *${upiId}*\n\n`;
-
-            if (instructions) upiMsg += `ℹ️ ${instructions}\n\n`;
-            upiMsg += `─────────────────\nAfter paying, type *PAID* to confirm ✅\nOr type *CANCEL* to cancel this order.`;
-
-            await incrementStoreMessageUsage(storeId, "outgoing");
-            twiml.message(upiMsg);
-            sendTwiml(res, twiml);
-
-            if (qrCodeUrl) {
-              const accessible = await isImageAccessible(qrCodeUrl);
-              if (accessible) {
-                try {
-                  const qrMessage = await client.messages.create({
-                    from: process.env.TWILIO_WHATSAPP_NUMBER,
-                    to: phone,
-                    body: `📷 *Scan to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`,
-                    mediaUrl: [qrCodeUrl]
-                  });
-                  console.log("✅ QR sent — SID:", qrMessage.sid);
-                  await incrementStoreMessageUsage(storeId, "outgoing");
-                } catch (qrErr) {
-                  console.error("❌ QR send failed:", qrErr.message);
-                  await sendWhatsAppMessage(phone, `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
-                  await incrementStoreMessageUsage(storeId, "outgoing");
-                }
-              } else {
-                await sendWhatsAppMessage(phone, `⚠️ QR code could not be loaded.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
-                await incrementStoreMessageUsage(storeId, "outgoing");
-              }
-            }
-            return;
+            await incrementStoreMessageUsage(recoveryStoreId, "outgoing");
+            twiml.message(
+              `📍 *Saved Delivery Address*\n\n` +
+              `👤 ${savedAddress.customer_name}\n` +
+              `🏠 ${savedAddress.address}\n\n` +
+              `Reply:\n` +
+              `*1* — Use Saved Address\n` +
+              `*2* — Add New Address`
+            );
+            return sendTwiml(res, twiml);
           }
+
+          // No saved address either — re-prompt clearly instead of silently
+          // failing address-format validation on a bare digit.
+          await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+          twiml.message(
+            `⚠️ Please send your *full delivery address and pincode* together.\n\n` +
+            `Example:\n*12 Main Street, Chennai 600001*\n\n` +
+            `Or type *cancel* to stop checkout.`
+          );
+          return sendTwiml(res, twiml);
         }
-        console.log("♻️ Live session still not 'payment' — falling through to normal address handling");
+
+        console.log("♻️ customer_address/pending_order_total already present — falling through to normal handling");
       }
 
       // ✅ allow cancel
