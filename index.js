@@ -769,19 +769,18 @@ app.post("/whatsapp", async (req, res) => {
     // ✅ 6. CHECKOUT STEP — ADDRESS + PINCODE
     if (session?.checkout_step === "address_pincode") {
       console.log("📍 address_pincode step:", msg);
+      console.log("📍 FULL session row at entry:", JSON.stringify(session));
 
       const trimmed = msg.trim();
 
-      // ✅ ROOT-CAUSE FIX: a customer's address message already advanced
-      // checkout_step to "payment" in the DB, but this request read a stale
-      // session (duplicate/retried Twilio webhook, or a race between two
-      // near-simultaneous requests for the same phone). If they're now
-      // sending a bare "1"/"2" AND the address was already saved
-      // (pending_order_total/customer_address present on the stale session),
-      // don't re-prompt for an address — re-fetch the live session and route
-      // into payment instead.
-      if ((msg === "1" || msg === "2") && session.customer_address && session.pending_order_total) {
-        console.log("♻️ Stale address_pincode session detected on payment selection — re-fetching live session for", phone);
+      // ✅ ROOT-CAUSE FIX v2: don't rely on the stale in-memory `session`
+      // object's fields at all (they can be equally stale/unpopulated if
+      // this request raced the one that wrote the address). Any time the
+      // step is "address_pincode" but the message is a bare "1"/"2" (never
+      // a valid address+pincode), ALWAYS re-read the live DB row first,
+      // before doing any address-format validation.
+      if (msg === "1" || msg === "2") {
+        console.log("♻️ Bare digit received during address_pincode step — re-fetching live session for", phone);
 
         const { data: liveSession, error: liveSessionError } = await supabase
           .from("user_sessions")
