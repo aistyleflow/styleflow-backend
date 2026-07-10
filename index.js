@@ -1467,15 +1467,44 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // 1. persist selection, 2. move session forward, 3. reply — all three,
-      // every time, so a numeric pick never results in silence.
-      await saveSelectedProduct(phone, freshProduct.id);
-      await supabase.from("user_sessions")
+      // Success flow — each step logged and awaited individually so that if
+      // any single step throws, we still know exactly where, and the outer
+      // try/catch still guarantees a reply is sent (see final catch block).
+
+      // 1. Persist the selection so ADD / size-step etc. can find it later.
+      const savedSelection = await saveSelectedProduct(phone, freshProduct.id);
+      console.log("saveSelectedProduct result:", savedSelection);
+
+      // 2. Move the session's action_step forward.
+      const { error: actionStepError } = await supabase
+        .from("user_sessions")
         .update({ action_step: "product_action" })
         .eq("phone_number", phone);
+      if (actionStepError) {
+        console.error("action_step update error:", actionStepError.message);
+      } else {
+        console.log("action_step set to product_action for", phone);
+      }
 
+      // 3. Usage counter (non-fatal if it fails internally).
       await incrementStoreMessageUsage(freshProduct.store_id || activeStoreId, "outgoing");
-      await sendProductMessage(twiml, freshProduct);
+
+      // 4. Build the reply message onto twiml (may attach media).
+      try {
+        await sendProductMessage(twiml, freshProduct);
+        console.log("sendProductMessage completed for product:", freshProduct.id);
+      } catch (sendErr) {
+        console.error("sendProductMessage failed, falling back to text-only reply:", sendErr.message);
+        twiml.message(
+          `🛍️ *${freshProduct.product_name}*\n` +
+          `💰 ₹${freshProduct.price}\n` +
+          `📐 Sizes: ${freshProduct.size || 'Free Size'}\n` +
+          `🎨 Color: ${freshProduct.color}\n\n` +
+          `Type *ADD* to add to cart, *CART* to view cart, *CHECKOUT* to checkout.`
+        );
+      }
+
+      // 5. Always send the reply — this line must be reached no matter what.
       return sendTwiml(res, twiml);
     }
 
