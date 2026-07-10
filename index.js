@@ -343,6 +343,13 @@ async function sendWhatsAppMessage(to, messageBody) {
 }
 
 async function sendProductMessage(twiml, product) {
+  console.log("📤 sendProductMessage START", {
+    productId: product?.id,
+    productName: product?.product_name,
+    image: product?.image_url
+  });
+
+  console.log("📤 About to create TwiML message for product:", product.product_name);
   const message = twiml.message();
   message.body(
     `🛍️ *Product Details*\n\n` +
@@ -357,10 +364,22 @@ async function sendProductMessage(twiml, product) {
     `Type *CHECKOUT* to ✅ Checkout\n` +
     `🔍 Or search more products`
   );
+  console.log("📤 TwiML product message added");
+
   if (product.image_url) {
     const accessible = await isImageAccessible(product.image_url);
-    if (accessible) message.media(product.image_url);
+    console.log("📤 Image accessibility check:", product.image_url, "→ accessible:", accessible);
+    if (accessible) {
+      message.media(product.image_url);
+      console.log("📤 Media attached to TwiML message");
+    } else {
+      console.log("📤 Image not accessible — sending text-only message");
+    }
+  } else {
+    console.log("📤 No image_url on product — sending text-only message");
   }
+
+  return true;
 }
 
 async function saveSession(phone, data) {
