@@ -202,11 +202,12 @@ async function saveCustomerAddress(phone, storeId, customerName, address, pincod
   }
 }
 
+// ✅ FIX — getOrderItems reads snapshot fields first, falls back to products table for old rows
 async function getOrderItems(orderId) {
   try {
     const { data: orderItems } = await supabase
       .from('order_items')
-      .select('quantity, product_id')
+      .select('quantity, product_id, product_name, price, size')
       .eq('order_id', orderId)
 
     if (!orderItems || orderItems.length === 0) return '   No items found'
@@ -215,17 +216,24 @@ async function getOrderItems(orderId) {
     let total = 0
 
     for (const item of orderItems) {
-      const { data: product } = await supabase
-        .from('products')
-        .select('product_name, price')
-        .eq('id', item.product_id)
-        .maybeSingle()
+      // ✅ Use snapshot fields if available, fallback to products table for old rows
+      let productName = item.product_name || null;
+      let productPrice = item.price || null;
 
-      if (product) {
-        const itemTotal = product.price * item.quantity
-        total += itemTotal
-        itemsText += `   • ${product.product_name} × ${item.quantity} = ₹${itemTotal}\n`
+      if (!productName || !productPrice) {
+        const { data: product } = await supabase
+          .from('products')
+          .select('product_name, price')
+          .eq('id', item.product_id)
+          .maybeSingle();
+        productName = productName || product?.product_name || 'Unknown Product';
+        productPrice = productPrice || product?.price || 0;
       }
+
+      const itemTotal = productPrice * item.quantity;
+      total += itemTotal;
+      const sizeText = item.size && item.size !== 'Free Size' ? ` (${item.size})` : '';
+      itemsText += `   • ${productName}${sizeText} × ${item.quantity} = ₹${itemTotal}\n`;
     }
 
     itemsText += `   💰 Total: ₹${total}`
@@ -384,10 +392,6 @@ async function sendProductMessage(twiml, product) {
 
 async function saveSession(phone, data) {
   try {
-    // ✅ Fix — store the raw array directly. last_results is a jsonb column,
-    // so Supabase serializes it correctly on write. Stringifying it here was
-    // causing it to come back as a plain string on read, breaking Array.isArray()
-    // checks in the number-selection block.
     const { data: existing } = await supabase
       .from("user_sessions")
       .select("phone_number")
@@ -774,10 +778,11 @@ app.post("/whatsapp", async (req, res) => {
       const trimmed = msg.trim();
       const pincodeMatch = trimmed.match(/\b(\d{6})\b/);
 
+      // ✅ FIX — reject junk like "2", "ok", short messages without pincode
       if (!pincodeMatch || trimmed.length < 10) {
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.message(
-          `⚠️ Please include a valid *6-digit pincode* in your message.\n\n` +
+          `⚠️ Please send your *full address with 6-digit pincode*.\n\n` +
           `Example:\n*12 Main Street, Chennai 600001*\n\n` +
           `Type your full address followed by your 6-digit pincode.`
         );
@@ -1406,18 +1411,10 @@ app.post("/whatsapp", async (req, res) => {
         );
         return sendTwiml(res, twiml);
       }
-      // ⚠️ IMPORTANT: no `return` here for any other message (e.g. a number like
-      // "2"). Falling through (instead of silently stopping) lets execution
-      // continue down to the number-selection block (15) below, which is what
-      // actually handles numeric picks after a multi-result search.
+      // fall through to number check for numeric picks after multi-result search
     }
 
-    // ✅ 15. NUMBER CHECK — hardened per diagnosis:
-    //    - explicit selectedIndex parsing (not reliance on raw `msg`)
-    //    - validates lastResults defensively (array + string fallback)
-    //    - validates the index range with a clear message
-    //    - fetches the fresh product by id + store_id (not by name)
-    //    - always ends in saveSelectedProduct + twiml.message + sendTwiml
+    // ✅ 15. NUMBER CHECK — hardened
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
@@ -1429,8 +1426,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // last_results is normally a real array (jsonb), but keep a string
-      // fallback for any older/legacy sessions.
       let lastResults = session.last_results;
       console.log("🔢 Number selection — raw last_results type:", typeof lastResults, "isArray:", Array.isArray(lastResults));
       console.log("🔢 selectedNumber (raw msg):", msg, "→ selectedIndex:", selectedIndex);
@@ -1476,28 +1471,15 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log("freshProduct:", freshProduct, "freshProductError:", freshProductError?.message || null);
 
-      if (freshProductError) {
-        console.error("❌ freshProduct lookup error:", freshProductError.message);
-      }
-
       if (!freshProduct) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
         twiml.message(`⚠️ Product not found. Please search again!`);
         return sendTwiml(res, twiml);
       }
 
-      // Success flow — each step logged and awaited individually so that if
-      // any single step throws, we still know exactly where, and the outer
-      // try/catch still guarantees a reply is sent (see final catch block).
-
-      // 1. Persist the selection so ADD / size-step etc. can find it later.
       const savedSelection = await saveSelectedProduct(phone, freshProduct.id);
       console.log("saveSelectedProduct result:", savedSelection);
 
-      // 2. Move the session's action_step forward AND clear the old
-      //    search-results list so the session stops behaving as if it's
-      //    still waiting on a numbered list choice (fixes stale list state
-      //    lingering after a product has already been picked).
       const { error: actionStepError } = await supabase
         .from("user_sessions")
         .update({
@@ -1511,10 +1493,8 @@ app.post("/whatsapp", async (req, res) => {
         console.log("action_step set to product_action (search list cleared) for", phone);
       }
 
-      // 3. Usage counter (non-fatal if it fails internally).
       await incrementStoreMessageUsage(freshProduct.store_id || activeStoreId, "outgoing");
 
-      // 4. Build the reply message onto twiml (may attach media).
       try {
         await sendProductMessage(twiml, freshProduct);
         console.log("sendProductMessage completed for product:", freshProduct.id);
@@ -1529,12 +1509,10 @@ app.post("/whatsapp", async (req, res) => {
         );
       }
 
-      // 5. Always send the reply — this line must be reached no matter what.
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 16. SEARCH — always scoped to the active store; never falls through
-    // to searching every store's products
+    // ✅ 16. SEARCH — scoped to active store
     console.log(`🔍 Searching: "${msg}" — store_id: ${sessionStoreId || 'none'}`);
 
     if (!sessionStoreId) {
@@ -1562,8 +1540,6 @@ app.post("/whatsapp", async (req, res) => {
         await incrementStoreMessageUsage(data[0].store_id || activeStoreId, "outgoing");
         await sendProductMessage(twiml, data[0]);
       } else {
-        // ✅ Fix — mark session as being in selection mode so a follow-up
-        // number (e.g. "3") is correctly picked up by the number-check block
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
 
         let response = `🛍️ *Products matching "${msg}"*:\n\n`;
@@ -1598,8 +1574,7 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ✅ Shared order placement — FIXED: size saved correctly in order_items,
-// no undefined variables (cart/orderData/item.product_name/item.price removed)
+// ✅ placeOrder — FIX: order_items now saves product_name + price as snapshot
 async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
   try {
     const { data: cartItems } = await supabase
@@ -1660,12 +1635,14 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
         const itemTotal = product.price * item.quantity;
         orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
 
-        // ✅ Fix — collect order_items rows using real cart item + product data
+        // ✅ FIX — save product_name + price + size as snapshot
         orderItemsToInsert.push({
           order_id: order.id,
           product_id: item.product_id,
           quantity: item.quantity,
-          size: item.size || null
+          size: item.size || null,
+          product_name: product.product_name,
+          price: product.price
         });
       }
     }
@@ -1739,7 +1716,6 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
   }
 }
 
-// ✅ /update-status: fixed 500, same-status protection, proper try/catch
 app.post("/update-status", async (req, res) => {
   try {
     const { orderId, newStatus } = req.body;
