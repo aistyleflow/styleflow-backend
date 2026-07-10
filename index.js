@@ -1316,8 +1316,7 @@ app.post("/whatsapp", async (req, res) => {
       await incrementStoreMessageUsage(storeId, "outgoing");
       twiml.message(
         `🛍️ *Checkout* — ${cartCheck.length} item${cartCheck.length > 1 ? "s" : ""} in your cart.\n\n` +
-        `👤 Please send your *name and phone number* together.\n\n` +
-      );
+        `👤 Please send your *name and phone number* together.\n\n` +;
       return sendTwiml(res, twiml);
     }
 
