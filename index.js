@@ -823,10 +823,13 @@ app.post("/whatsapp", async (req, res) => {
 
     const fullAddress = `${address}, ${pincode}`;
 
-    const { data: cartItems } = await supabase
+    const { data: cartItems, error: cartError } = await supabase
       .from("cart")
       .select("*")
       .eq("phone_number", phone);
+
+    console.log("🛒 address step cartItems:", cartItems);
+    console.log("🛒 address step cartError:", cartError);
 
     if (!cartItems || cartItems.length === 0) {
       await supabase
@@ -840,15 +843,21 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     let storeId = sessionStoreId;
+
     if (!storeId) {
-      const { data: firstProduct } = await supabase
+      const { data: firstProduct, error: firstProductError } = await supabase
         .from("products")
         .select("store_id")
         .eq("id", cartItems[0].product_id)
         .maybeSingle();
 
+      console.log("🏪 firstProduct for storeId:", firstProduct);
+      console.log("🏪 firstProductError:", firstProductError);
+
       if (firstProduct?.store_id) storeId = firstProduct.store_id;
     }
+
+    console.log("🏪 final storeId in address step:", storeId);
 
     let orderTotal = 0;
     for (const item of cartItems) {
@@ -864,7 +873,7 @@ app.post("/whatsapp", async (req, res) => {
     const shopName = await getShopName(storeId);
     const paymentSettings = await getPaymentSettings(storeId);
 
-    await supabase
+    const { data: addressUpdateData, error: addressUpdateError } = await supabase
       .from("user_sessions")
       .update({
         customer_address: fullAddress,
@@ -873,7 +882,13 @@ app.post("/whatsapp", async (req, res) => {
         pending_store_id: storeId,
         pending_order_total: orderTotal
       })
-      .eq("phone_number", phone);
+      .eq("phone_number", phone)
+      .select();
+
+    console.log("📍 address update data:", addressUpdateData);
+    console.log("📍 address update error:", addressUpdateError);
+    console.log("📍 fullAddress saved:", fullAddress);
+    console.log("📍 pincode saved:", pincode);
 
     const codEnabled = paymentSettings?.cod_enabled !== false;
     const upiEnabled = paymentSettings?.upi_enabled !== false;
