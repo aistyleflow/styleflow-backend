@@ -742,7 +742,6 @@ app.post("/whatsapp", async (req, res) => {
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.message(
           `⚠️ Please send your *name and phone number* together.\n\n` +
-          `Example:\n*Sanjay 9876543210*\n\n` +
           `Type your full name followed by your phone number.`
         );
         return sendTwiml(res, twiml);
@@ -772,85 +771,123 @@ app.post("/whatsapp", async (req, res) => {
       console.log("📍 address_pincode step:", msg);
 
       const trimmed = msg.trim();
-      const pincodeMatch = trimmed.match(/\b(\d{6})\b/);
 
-      if (!pincodeMatch || trimmed.length < 10) {
-        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.message(
-          `⚠️ Please include a valid *6-digit pincode* in your message.\n\n` +
-          `Example:\n*12 Main Street, Chennai 600001*\n\n` +
-          `Type your full address followed by your 6-digit pincode.`
-        );
-        return sendTwiml(res, twiml);
-      }
+      // ✅ allow cancel
+      if (msgLower === "cancel") {
+        await supabase
+          .from("user_sessions")
+          .update({
+            checkout_step: null,
+            action_step: null,
+            pending_store_id: null,
+            pending_order_total: null
+          })
+          .eq("phone_number", phone);
 
-      const pincode = pincodeMatch[1];
-      const address = trimmed.replace(pincodeMatch[0], '').replace(/,\s*$/, '').trim();
-
-      if (!address) {
-        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.message(
-          `⚠️ Please include your *full address* along with the pincode.\n\n` +
-          `Example:\n*12 Main Street, Chennai 600001*`
-        );
-        return sendTwiml(res, twiml);
-      }
-
-      const fullAddress = `${address}, ${pincode}`;
-
-      const { data: cartItems } = await supabase
-        .from("cart").select("*").eq("phone_number", phone);
-
-      if (!cartItems || cartItems.length === 0) {
-        await supabase.from("user_sessions").update({ checkout_step: null }).eq("phone_number", phone);
-        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.message(`⚠️ Your cart is empty!`);
-        return sendTwiml(res, twiml);
-      }
-
-      let storeId = sessionStoreId;
-      if (!storeId) {
-        const { data: firstProduct } = await supabase
-          .from("products").select("store_id")
-          .eq("id", cartItems[0].product_id).maybeSingle();
-        if (firstProduct?.store_id) storeId = firstProduct.store_id;
-      }
-
-      let orderTotal = 0;
-      for (const item of cartItems) {
-        const { data: product } = await supabase
-          .from("products").select("price")
-          .eq("id", item.product_id).maybeSingle();
-        if (product) orderTotal += product.price * item.quantity;
-      }
-
-      const shopName = await getShopName(storeId);
-      const paymentSettings = await getPaymentSettings(storeId);
-
-      await supabase
-        .from("user_sessions")
-        .update({
-          customer_address: fullAddress,
-          customer_pincode: pincode,
-          checkout_step: "payment",
-          pending_store_id: storeId,
-          pending_order_total: orderTotal
-        })
-        .eq("phone_number", phone);
-
-      const codEnabled = paymentSettings?.cod_enabled !== false;
-      const upiEnabled = paymentSettings?.upi_enabled !== false;
-
-      if (!codEnabled && !upiEnabled) {
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(`⚠️ No payment methods available.\n\nPlease contact *${shopName}*.`);
-        return sendTwiml(res, twiml);
-      }
-
-      await incrementStoreMessageUsage(storeId, "outgoing");
-      twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName));
+      await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+      twiml.message("❌ Checkout cancelled.");
       return sendTwiml(res, twiml);
     }
+
+    // ✅ extract 6-digit pincode
+    const pincodeMatch = trimmed.match(/\b(\d{6})\b/);
+
+    // ✅ reject junk like "2"
+    if (!pincodeMatch || trimmed.length < 10) {
+      await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+      twiml.message(
+        `⚠️ Invalid address format.\n\n` +
+        `Please send your *full address + 6-digit pincode* in one message.\n\n` +
+        `Example:\n*12 Main Street, Chennai 600001*\n\n` +
+        `Or type *cancel* to stop checkout.`
+      );
+      return sendTwiml(res, twiml);
+    }
+
+    const pincode = pincodeMatch[1];
+
+    // remove the pincode from the address text
+    const address = trimmed
+      .replace(pincodeMatch[0], '')
+      .replace(/,\s*$/, '')
+      .trim();
+
+    if (!address || address.length < 5) {
+      await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+      twiml.message(
+        `⚠️ Please include your *full address* along with the pincode.\n\n` +
+        `Example:\n*12 Main Street, Chennai 600001*`
+      );
+      return sendTwiml(res, twiml);
+    }
+
+    const fullAddress = `${address}, ${pincode}`;
+
+    const { data: cartItems } = await supabase
+      .from("cart")
+      .select("*")
+      .eq("phone_number", phone);
+
+    if (!cartItems || cartItems.length === 0) {
+      await supabase
+        .from("user_sessions")
+        .update({ checkout_step: null })
+        .eq("phone_number", phone);
+
+      await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+      twiml.message(`⚠️ Your cart is empty!`);
+      return sendTwiml(res, twiml);
+    }
+
+    let storeId = sessionStoreId;
+    if (!storeId) {
+      const { data: firstProduct } = await supabase
+        .from("products")
+        .select("store_id")
+        .eq("id", cartItems[0].product_id)
+        .maybeSingle();
+
+      if (firstProduct?.store_id) storeId = firstProduct.store_id;
+    }
+
+    let orderTotal = 0;
+    for (const item of cartItems) {
+      const { data: product } = await supabase
+        .from("products")
+        .select("price")
+        .eq("id", item.product_id)
+        .maybeSingle();
+
+      if (product) orderTotal += product.price * item.quantity;
+    }
+
+    const shopName = await getShopName(storeId);
+    const paymentSettings = await getPaymentSettings(storeId);
+
+    await supabase
+      .from("user_sessions")
+      .update({
+        customer_address: fullAddress,
+        customer_pincode: pincode,
+        checkout_step: "payment",
+        pending_store_id: storeId,
+        pending_order_total: orderTotal
+      })
+      .eq("phone_number", phone);
+
+    const codEnabled = paymentSettings?.cod_enabled !== false;
+    const upiEnabled = paymentSettings?.upi_enabled !== false;
+
+    if (!codEnabled && !upiEnabled) {
+      await incrementStoreMessageUsage(storeId, "outgoing");
+      twiml.message(`⚠️ No payment methods available.\n\nPlease contact *${shopName}*.`);
+      return sendTwiml(res, twiml);
+    }
+
+    await incrementStoreMessageUsage(storeId, "outgoing");
+    twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName));
+    return sendTwiml(res, twiml);
+  }
 
     // ✅ 7. CHECKOUT STEP — SAVED ADDRESS CHOICE
     if (session?.checkout_step === "saved_address_choice") {
@@ -1280,7 +1317,6 @@ app.post("/whatsapp", async (req, res) => {
       twiml.message(
         `🛍️ *Checkout* — ${cartCheck.length} item${cartCheck.length > 1 ? "s" : ""} in your cart.\n\n` +
         `👤 Please send your *name and phone number* together.\n\n` +
-        `Example: *Sanjay 9876543210*`
       );
       return sendTwiml(res, twiml);
     }
