@@ -384,7 +384,7 @@ async function sendProductMessage(twiml, product) {
 
 async function saveSession(phone, data) {
   try {
-    // ✅ Fix — store the raw array directly. last_results is a jsonb column,
+    // ✅ store the raw array directly. last_results is a jsonb column,
     // so Supabase serializes it correctly on write. Stringifying it here was
     // causing it to come back as a plain string on read, breaking Array.isArray()
     // checks in the number-selection block.
@@ -1418,6 +1418,8 @@ app.post("/whatsapp", async (req, res) => {
     //    - validates the index range with a clear message
     //    - fetches the fresh product by id + store_id (not by name)
     //    - always ends in saveSelectedProduct + twiml.message + sendTwiml
+    //    - fallback reply now text-first AND still attempts the image
+    //      (previous version dropped the image entirely on fallback)
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
@@ -1515,18 +1517,29 @@ app.post("/whatsapp", async (req, res) => {
       await incrementStoreMessageUsage(freshProduct.store_id || activeStoreId, "outgoing");
 
       // 4. Build the reply message onto twiml (may attach media).
+      //    FIX: fallback now sends text first, then still tries to attach
+      //    the image separately — never silently drops the image on a
+      //    sendProductMessage failure.
       try {
         await sendProductMessage(twiml, freshProduct);
         console.log("sendProductMessage completed for product:", freshProduct.id);
       } catch (sendErr) {
-        console.error("sendProductMessage failed, falling back to text-only reply:", sendErr.message);
-        twiml.message(
+        console.error("sendProductMessage failed, falling back to text-first reply:", sendErr.message);
+        const fallbackMsg = twiml.message();
+        fallbackMsg.body(
           `🛍️ *${freshProduct.product_name}*\n` +
           `💰 ₹${freshProduct.price}\n` +
           `📐 Sizes: ${freshProduct.size || 'Free Size'}\n` +
           `🎨 Color: ${freshProduct.color}\n\n` +
           `Type *ADD* to add to cart, *CART* to view cart, *CHECKOUT* to checkout.`
         );
+        if (freshProduct.image_url) {
+          try {
+            fallbackMsg.media(freshProduct.image_url);
+          } catch (mediaErr) {
+            console.error("❌ Fallback media attach failed:", mediaErr.message);
+          }
+        }
       }
 
       // 5. Always send the reply — this line must be reached no matter what.
@@ -1562,7 +1575,7 @@ app.post("/whatsapp", async (req, res) => {
         await incrementStoreMessageUsage(data[0].store_id || activeStoreId, "outgoing");
         await sendProductMessage(twiml, data[0]);
       } else {
-        // ✅ Fix — mark session as being in selection mode so a follow-up
+        // ✅ mark session as being in selection mode so a follow-up
         // number (e.g. "3") is correctly picked up by the number-check block
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
 
@@ -1598,7 +1611,7 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ✅ Shared order placement — FIXED: size saved correctly in order_items,
+// ✅ Shared order placement — size saved correctly in order_items,
 // no undefined variables (cart/orderData/item.product_name/item.price removed)
 async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
   try {
@@ -1660,7 +1673,7 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
         const itemTotal = product.price * item.quantity;
         orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
 
-        // ✅ Fix — collect order_items rows using real cart item + product data
+        // ✅ collect order_items rows using real cart item + product data
         orderItemsToInsert.push({
           order_id: order.id,
           product_id: item.product_id,
