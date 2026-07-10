@@ -772,6 +772,112 @@ app.post("/whatsapp", async (req, res) => {
 
       const trimmed = msg.trim();
 
+      // ✅ ROOT-CAUSE FIX: a customer's address message already advanced
+      // checkout_step to "payment" in the DB, but this request read a stale
+      // session (duplicate/retried Twilio webhook, or a race between two
+      // near-simultaneous requests for the same phone). If they're now
+      // sending a bare "1"/"2" AND the address was already saved
+      // (pending_order_total/customer_address present on the stale session),
+      // don't re-prompt for an address — re-fetch the live session and route
+      // into payment instead.
+      if ((msg === "1" || msg === "2") && session.customer_address && session.pending_order_total) {
+        console.log("♻️ Stale address_pincode session detected on payment selection — re-fetching live session for", phone);
+
+        const { data: liveSession, error: liveSessionError } = await supabase
+          .from("user_sessions")
+          .select("*")
+          .eq("phone_number", phone)
+          .maybeSingle();
+
+        console.log("♻️ liveSession.checkout_step:", liveSession?.checkout_step, "error:", liveSessionError);
+
+        if (liveSession?.checkout_step === "payment") {
+          const storeId = liveSession.pending_store_id || sessionStoreId;
+          const orderTotal = liveSession.pending_order_total || 0;
+          const shopName = await getShopName(storeId);
+          const paymentSettings = await getPaymentSettings(storeId);
+
+          const codEnabled = paymentSettings?.cod_enabled !== false;
+          const upiEnabled = paymentSettings?.upi_enabled !== false;
+          const minCod = paymentSettings?.minimum_cod_amount || 0;
+
+          if (msg === "1") {
+            if (!codEnabled) {
+              await incrementStoreMessageUsage(storeId, "outgoing");
+              twiml.message(`⚠️ Cash on Delivery is not available.\n\nPlease type *2* to pay with UPI.`);
+              return sendTwiml(res, twiml);
+            }
+            if (minCod > 0 && orderTotal < minCod) {
+              await incrementStoreMessageUsage(storeId, "outgoing");
+              twiml.message(`⚠️ COD requires minimum order of ₹${minCod}.\n\nYour order total is ₹${orderTotal}.\n\nPlease type *2* to pay with UPI.`);
+              return sendTwiml(res, twiml);
+            }
+            await placeOrder(phone, liveSession, storeId, orderTotal, shopName, "COD", "pending", res, twiml);
+            return;
+          }
+
+          if (msg === "2") {
+            if (!upiEnabled) {
+              await incrementStoreMessageUsage(storeId, "outgoing");
+              twiml.message(`⚠️ UPI payment is not available.\n\nPlease type *1* to use Cash on Delivery.`);
+              return sendTwiml(res, twiml);
+            }
+            const upiId = paymentSettings?.upi_id;
+            if (!upiId) {
+              await incrementStoreMessageUsage(storeId, "outgoing");
+              twiml.message(`⚠️ UPI payment is not configured for this store.\n\nPlease type *1* for Cash on Delivery or contact *${shopName}*.`);
+              return sendTwiml(res, twiml);
+            }
+
+            await supabase
+              .from("user_sessions")
+              .update({ checkout_step: "awaiting_payment", payment_method: "UPI" })
+              .eq("phone_number", phone);
+
+            const qrCodeUrl = paymentSettings?.qr_code_url;
+            const instructions = paymentSettings?.payment_instructions;
+
+            let upiMsg =
+              `📱 *Pay with UPI*\n\n` +
+              `🧾 Amount: *₹${orderTotal}*\n\n` +
+              `🏪 Pay to: *${shopName}*\n` +
+              `📲 UPI ID: *${upiId}*\n\n`;
+
+            if (instructions) upiMsg += `ℹ️ ${instructions}\n\n`;
+            upiMsg += `─────────────────\nAfter paying, type *PAID* to confirm ✅\nOr type *CANCEL* to cancel this order.`;
+
+            await incrementStoreMessageUsage(storeId, "outgoing");
+            twiml.message(upiMsg);
+            sendTwiml(res, twiml);
+
+            if (qrCodeUrl) {
+              const accessible = await isImageAccessible(qrCodeUrl);
+              if (accessible) {
+                try {
+                  const qrMessage = await client.messages.create({
+                    from: process.env.TWILIO_WHATSAPP_NUMBER,
+                    to: phone,
+                    body: `📷 *Scan to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`,
+                    mediaUrl: [qrCodeUrl]
+                  });
+                  console.log("✅ QR sent — SID:", qrMessage.sid);
+                  await incrementStoreMessageUsage(storeId, "outgoing");
+                } catch (qrErr) {
+                  console.error("❌ QR send failed:", qrErr.message);
+                  await sendWhatsAppMessage(phone, `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
+                  await incrementStoreMessageUsage(storeId, "outgoing");
+                }
+              } else {
+                await sendWhatsAppMessage(phone, `⚠️ QR code could not be loaded.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
+                await incrementStoreMessageUsage(storeId, "outgoing");
+              }
+            }
+            return;
+          }
+        }
+        console.log("♻️ Live session still not 'payment' — falling through to normal address handling");
+      }
+
       // ✅ allow cancel
       if (msgLower === "cancel") {
         await supabase
@@ -889,6 +995,56 @@ app.post("/whatsapp", async (req, res) => {
     console.log("📍 address update error:", addressUpdateError);
     console.log("📍 fullAddress saved:", fullAddress);
     console.log("📍 pincode saved:", pincode);
+
+    // ✅ Verify the write actually landed before replying. If a duplicate/retried
+    // webhook request raced this one and flipped checkout_step back, or the
+    // update silently no-opped, catch it here instead of sending payment
+    // options while the DB still says "address_pincode".
+    let confirmedStep = addressUpdateData && addressUpdateData[0]
+      ? addressUpdateData[0].checkout_step
+      : null;
+
+    if (confirmedStep !== "payment") {
+      console.log("⚠️ checkout_step did not confirm as 'payment' after update, re-checking:", confirmedStep);
+
+      const { data: recheckSession, error: recheckError } = await supabase
+        .from("user_sessions")
+        .select("checkout_step")
+        .eq("phone_number", phone)
+        .maybeSingle();
+
+      console.log("📍 recheck session:", recheckSession, "recheckError:", recheckError);
+
+      if (recheckSession?.checkout_step !== "payment") {
+        // one retry — the previous update may have lost a race with another
+        // in-flight request for the same phone number
+        const { data: retryData, error: retryError } = await supabase
+          .from("user_sessions")
+          .update({
+            customer_address: fullAddress,
+            customer_pincode: pincode,
+            checkout_step: "payment",
+            pending_store_id: storeId,
+            pending_order_total: orderTotal
+          })
+          .eq("phone_number", phone)
+          .select();
+
+        console.log("📍 retry update data:", retryData);
+        console.log("📍 retry update error:", retryError);
+
+        confirmedStep = retryData && retryData[0] ? retryData[0].checkout_step : null;
+      } else {
+        confirmedStep = recheckSession.checkout_step;
+      }
+    }
+
+    if (confirmedStep !== "payment") {
+      console.error("❌ Could not confirm checkout_step transitioned to 'payment' for", phone);
+      await incrementStoreMessageUsage(storeId, "outgoing");
+      twiml.message(`⚠️ Something went wrong saving your address. Please send your address and pincode again.`);
+      return sendTwiml(res, twiml);
+    }
 
     const codEnabled = paymentSettings?.cod_enabled !== false;
     const upiEnabled = paymentSettings?.upi_enabled !== false;
