@@ -1494,15 +1494,22 @@ app.post("/whatsapp", async (req, res) => {
       const savedSelection = await saveSelectedProduct(phone, freshProduct.id);
       console.log("saveSelectedProduct result:", savedSelection);
 
-      // 2. Move the session's action_step forward.
+      // 2. Move the session's action_step forward AND clear the old
+      //    search-results list so the session stops behaving as if it's
+      //    still waiting on a numbered list choice (fixes stale list state
+      //    lingering after a product has already been picked).
       const { error: actionStepError } = await supabase
         .from("user_sessions")
-        .update({ action_step: "product_action" })
+        .update({
+          action_step: "product_action",
+          last_results: null,
+          last_search_query: null
+        })
         .eq("phone_number", phone);
       if (actionStepError) {
         console.error("action_step update error:", actionStepError.message);
       } else {
-        console.log("action_step set to product_action for", phone);
+        console.log("action_step set to product_action (search list cleared) for", phone);
       }
 
       // 3. Usage counter (non-fatal if it fails internally).
