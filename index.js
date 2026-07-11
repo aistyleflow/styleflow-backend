@@ -1158,17 +1158,13 @@ app.post("/whatsapp", async (req, res) => {
         if (product) orderTotal += product.price * item.quantity;
       }
 
-      // ✅ Check if store has any coupon offers
-      const { data: activeOffers } = await supabase
-        .from("offers")
-        .select("id")
-        .eq("store_id", storeId)
-        .not("coupon_code", "is", null)
-        .neq("coupon_code", "")
-        .limit(1);
-
-      const hasCoupons = activeOffers && activeOffers.length > 0;
-      const nextStep = hasCoupons ? "coupon" : "payment";
+      // ✅ FIX — always go to the coupon step, regardless of whether any
+      // offer has ever been broadcast. hasCoupons only tells us if a
+      // coupon was ever *sent* via /send-offer — it says nothing about
+      // whether a valid coupon exists. Always let the customer try one;
+      // validateCoupon() rejects invalid/expired codes anyway, and SKIP
+      // still moves straight to payment.
+      const nextStep = "coupon";
 
       // ✅ FIX 1 — Only update columns that actually exist in user_sessions
       // customer_pincode is stored inside fullAddress string, not as separate column
@@ -1206,31 +1202,14 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log(`✅ Address saved — step moved to: ${nextStep}`);
 
-      if (hasCoupons) {
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(
-          `✅ *Address saved!*\n\n` +
-          `🎟️ *Do you have a coupon code?*\n\n` +
-          `🧾 Cart Total: *₹${orderTotal}*\n\n` +
-          `Type your *coupon code* to get a discount.\n` +
-          `Or type *SKIP* to continue without a coupon.`
-        );
-        return sendTwiml(res, twiml);
-      }
-
-      const shopName = await getShopName(storeId);
-      const paymentSettings = await getPaymentSettings(storeId);
-      const codEnabled = paymentSettings?.cod_enabled !== false;
-      const upiEnabled = paymentSettings?.upi_enabled !== false;
-
-      if (!codEnabled && !upiEnabled) {
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(`⚠️ No payment methods available.\n\nPlease contact *${shopName}*.`);
-        return sendTwiml(res, twiml);
-      }
-
       await incrementStoreMessageUsage(storeId, "outgoing");
-      twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, false));
+      twiml.message(
+        `✅ *Address saved!*\n\n` +
+        `🎟️ *Do you have a coupon code?*\n\n` +
+        `🧾 Cart Total: *₹${orderTotal}*\n\n` +
+        `Type your *coupon code* to get a discount.\n` +
+        `Or type *SKIP* to continue without a coupon.`
+      );
       return sendTwiml(res, twiml);
     }
 
@@ -1274,41 +1253,29 @@ app.post("/whatsapp", async (req, res) => {
         const shopName = await getShopName(storeId);
         const paymentSettings = await getPaymentSettings(storeId);
 
-        const { data: activeOffers } = await supabase
-          .from("offers")
-          .select("id")
-          .eq("store_id", storeId)
-          .not("coupon_code", "is", null)
-          .neq("coupon_code", "")
-          .limit(1);
-
-        const hasCoupons = activeOffers && activeOffers.length > 0;
-
+        // ✅ FIX — always go to the coupon step here too, for the same
+        // reason as the address_pincode path above: hasCoupons only
+        // reflects whether an offer was ever broadcast, not whether a
+        // valid coupon exists to type in.
         await supabase
           .from("user_sessions")
           .update({
             customer_name: savedAddress.customer_name,
             customer_address: savedAddress.address,
-            checkout_step: hasCoupons ? "coupon" : "payment",
+            checkout_step: "coupon",
             pending_store_id: storeId,
             pending_order_total: orderTotal
           })
           .eq("phone_number", phone);
 
-        if (hasCoupons) {
-          await incrementStoreMessageUsage(storeId, "outgoing");
-          twiml.message(
-            `✅ *Address confirmed!*\n\n` +
-            `🎟️ *Do you have a coupon code?*\n\n` +
-            `🧾 Cart Total: *₹${orderTotal}*\n\n` +
-            `Type your *coupon code* to get a discount.\n` +
-            `Or type *SKIP* to continue without a coupon.`
-          );
-          return sendTwiml(res, twiml);
-        }
-
         await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, false));
+        twiml.message(
+          `✅ *Address confirmed!*\n\n` +
+          `🎟️ *Do you have a coupon code?*\n\n` +
+          `🧾 Cart Total: *₹${orderTotal}*\n\n` +
+          `Type your *coupon code* to get a discount.\n` +
+          `Or type *SKIP* to continue without a coupon.`
+        );
         return sendTwiml(res, twiml);
       }
 
