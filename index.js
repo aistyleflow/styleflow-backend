@@ -43,6 +43,19 @@ function formatDate(dateString) {
   })
 }
 
+// ✅ Short date-only formatter for coupon validity windows (no time needed)
+function formatDateOnly(dateString) {
+  if (!dateString) return 'N/A'
+  const date = new Date(dateString)
+  if (isNaN(date.getTime())) return 'N/A'
+  return date.toLocaleDateString('en-IN', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata'
+  })
+}
+
 function getStatusEmoji(status) {
   switch (status) {
     case 'pending':   return '⏳'
@@ -311,6 +324,8 @@ async function getStorePhone(storeId) {
   }
 }
 
+// ✅ FIX 2 — validateCoupon() now returns formatted start/end dates on failure
+// so the caller (coupon chat step) can show the exact reason with dates.
 async function validateCoupon(couponCode, storeId, orderTotal) {
   try {
     const { data: offer, error } = await supabase
@@ -327,7 +342,12 @@ async function validateCoupon(couponCode, storeId, orderTotal) {
     if (offer.start_date) {
       const startDate = new Date(offer.start_date);
       if (new Date() < startDate) {
-        return { valid: false, reason: "not_started", offer };
+        return {
+          valid: false,
+          reason: "not_started",
+          offer,
+          startDateFormatted: formatDateOnly(offer.start_date)
+        };
       }
     }
 
@@ -335,7 +355,12 @@ async function validateCoupon(couponCode, storeId, orderTotal) {
       const endDate = new Date(offer.end_date);
       endDate.setHours(23, 59, 59, 999);
       if (new Date() > endDate) {
-        return { valid: false, reason: "expired", offer };
+        return {
+          valid: false,
+          reason: "expired",
+          offer,
+          endDateFormatted: formatDateOnly(offer.end_date)
+        };
       }
     }
 
@@ -692,6 +717,7 @@ app.post("/whatsapp", async (req, res) => {
     }
 
     // ✅ 3. CHECKOUT STEP — COUPON
+    // ✅ FIX 3 — error messages now show exact reason with dates
     if (session?.checkout_step === "coupon") {
       const storeId = session.pending_store_id || sessionStoreId;
       const orderTotal = session.pending_order_total || 0;
@@ -720,9 +746,9 @@ app.post("/whatsapp", async (req, res) => {
       if (!result.valid) {
         let errorMsg = `⚠️ *Invalid coupon code.*\n\n`;
         if (result.reason === "expired") {
-          errorMsg = `⏰ *Coupon expired.*\n\nThis offer has ended.\n\n`;
+          errorMsg = `⏰ *Coupon expired.*\n\nThis offer ended on *${result.endDateFormatted}*.\n\n`;
         } else if (result.reason === "not_started") {
-          errorMsg = `📅 *Coupon not yet active.*\n\nThis offer hasn't started yet.\n\n`;
+          errorMsg = `📅 *Coupon not yet active.*\n\nThis offer starts on *${result.startDateFormatted}*.\n\n`;
         } else if (result.reason === "min_order") {
           errorMsg = `🛍️ *Minimum order required.*\n\nThis coupon requires a minimum order of ₹${result.minOrder}.\nYour cart total is ₹${orderTotal}.\n\n`;
         }
@@ -2083,9 +2109,16 @@ app.post("/update-status", async (req, res) => {
   }
 });
 
+// ✅ FIX 1 — /send-offer now accepts and saves discount_type, discount_value,
+// minimum_order_amount, start_date, end_date to the offers table, and
+// includes these details in the broadcast WhatsApp message.
 app.post("/send-offer", async (req, res) => {
   try {
-    const { storeId, title, description, couponCode, imageUrl, audience, customPhones } = req.body;
+    const {
+      storeId, title, description, couponCode, imageUrl, audience, customPhones,
+      discountType, discountValue, minimumOrderAmount, startDate, endDate
+    } = req.body;
+
     if (!storeId || !title || !description) return res.status(400).json({ error: "storeId, title and description required" });
 
     const shopName = await getShopName(storeId);
@@ -2112,7 +2145,27 @@ app.post("/send-offer", async (req, res) => {
 
     if (customerPhones.length === 0) return res.status(200).json({ success: true, sent: 0, message: "No customers found" });
 
-    const offerMessage = messages.offerMessage(shopName, title, description, couponCode);
+    // ✅ Build extra coupon detail lines for the broadcast message (only if a coupon exists)
+    let couponDetailsText = '';
+    if (couponCode) {
+      if (discountType && discountValue) {
+        const discountLabel = discountType === "percentage"
+          ? `${discountValue}% off`
+          : `₹${discountValue} off`;
+        couponDetailsText += `\n💸 Discount: *${discountLabel}*`;
+      }
+      if (minimumOrderAmount) {
+        couponDetailsText += `\n🛍️ Minimum Order: *₹${minimumOrderAmount}*`;
+      }
+      if (startDate) {
+        couponDetailsText += `\n📅 Valid From: *${formatDateOnly(startDate)}*`;
+      }
+      if (endDate) {
+        couponDetailsText += `\n⏰ Valid Until: *${formatDateOnly(endDate)}*`;
+      }
+    }
+
+    const offerMessage = messages.offerMessage(shopName, title, description, couponCode) + couponDetailsText;
     let sentCount = 0;
 
     for (const phone of customerPhones) {
@@ -2123,10 +2176,21 @@ app.post("/send-offer", async (req, res) => {
       }
     }
 
+    // ✅ Save discount_type, discount_value, minimum_order_amount, start_date, end_date
     await supabase.from("offers").insert({
-      store_id: storeId, title, description,
-      coupon_code: couponCode || null, image_url: imageUrl || null,
-      audience, sent_count: sentCount, created_at: new Date().toISOString()
+      store_id: storeId,
+      title,
+      description,
+      coupon_code: couponCode || null,
+      image_url: imageUrl || null,
+      audience,
+      sent_count: sentCount,
+      discount_type: discountType || null,
+      discount_value: discountValue || null,
+      minimum_order_amount: minimumOrderAmount || null,
+      start_date: startDate || null,
+      end_date: endDate || null,
+      created_at: new Date().toISOString()
     });
 
     return res.status(200).json({ success: true, sent: sentCount, total: customerPhones.length });
