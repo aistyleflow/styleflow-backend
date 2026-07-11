@@ -311,11 +311,8 @@ async function getStorePhone(storeId) {
   }
 }
 
-// ✅ NEW — validate coupon code against offers table
 async function validateCoupon(couponCode, storeId, orderTotal) {
   try {
-    const now = new Date().toISOString();
-
     const { data: offer, error } = await supabase
       .from("offers")
       .select("*")
@@ -327,7 +324,6 @@ async function validateCoupon(couponCode, storeId, orderTotal) {
       return { valid: false, reason: "invalid" };
     }
 
-    // ✅ Check date range if start/end dates exist
     if (offer.start_date) {
       const startDate = new Date(offer.start_date);
       if (new Date() < startDate) {
@@ -337,20 +333,17 @@ async function validateCoupon(couponCode, storeId, orderTotal) {
 
     if (offer.end_date) {
       const endDate = new Date(offer.end_date);
-      // set end of day for end_date
       endDate.setHours(23, 59, 59, 999);
       if (new Date() > endDate) {
         return { valid: false, reason: "expired", offer };
       }
     }
 
-    // ✅ Check minimum order amount
     const minOrder = offer.minimum_order_amount || 0;
     if (minOrder > 0 && orderTotal < minOrder) {
       return { valid: false, reason: "min_order", offer, minOrder };
     }
 
-    // ✅ Calculate discount
     let discountAmount = 0;
     if (offer.discount_type === "percentage") {
       discountAmount = Math.round((orderTotal * (offer.discount_value || 0)) / 100);
@@ -358,9 +351,7 @@ async function validateCoupon(couponCode, storeId, orderTotal) {
       discountAmount = offer.discount_value || 0;
     }
 
-    // ✅ Discount can't exceed order total
     discountAmount = Math.min(discountAmount, orderTotal);
-
     const finalTotal = orderTotal - discountAmount;
 
     return {
@@ -396,9 +387,12 @@ app.get("/whatsapp", (req, res) => {
 
 async function isImageAccessible(url) {
   try {
+    if (!url || url.trim() === '') return false;
     const response = await fetch(url, { method: "HEAD" });
+    console.log(`🔎 Image check: ${url} → ${response.status} ${response.ok ? '✅' : '❌'}`);
     return response.ok;
   } catch (err) {
+    console.error("❌ Image accessibility check failed:", err.message);
     return false;
   }
 }
@@ -418,15 +412,11 @@ async function sendWhatsAppMessage(to, messageBody) {
   }
 }
 
-async function sendProductMessage(twiml, product) {
-  console.log("📤 sendProductMessage START", {
-    productId: product?.id,
-    productName: product?.product_name,
-    image: product?.image_url
-  });
+// ✅ FIX 2 — sendProductMessage always uses REST API so image sends correctly
+async function sendProductMessage(phone, product, storeId) {
+  console.log("📤 sendProductMessage — product:", product.product_name, "image:", product.image_url || "none");
 
-  const message = twiml.message();
-  message.body(
+  const bodyText =
     `🛍️ *Product Details*\n\n` +
     `📦 Product: ${product.product_name}\n` +
     `💰 Price: ₹${product.price}\n` +
@@ -437,17 +427,42 @@ async function sendProductMessage(twiml, product) {
     `Type *ADD* to 🛒 Add to Cart\n` +
     `Type *CART* to 👀 View Cart\n` +
     `Type *CHECKOUT* to ✅ Checkout\n` +
-    `🔍 Or search more products`
-  );
+    `🔍 Or search more products`;
 
-  if (product.image_url) {
-    const accessible = await isImageAccessible(product.image_url);
-    if (accessible) {
-      message.media(product.image_url);
+  try {
+    if (product.image_url && product.image_url.trim() !== '') {
+      const accessible = await isImageAccessible(product.image_url);
+
+      if (accessible) {
+        console.log("📷 Sending product with image via REST API");
+        await client.messages.create({
+          from: process.env.TWILIO_WHATSAPP_NUMBER,
+          to: phone,
+          body: bodyText,
+          mediaUrl: [product.image_url]
+        });
+        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+        return;
+      } else {
+        console.log("⚠️ Image not accessible — sending text only");
+      }
     }
-  }
 
-  return true;
+    // ✅ No image or not accessible — send text only
+    console.log("📝 Sending product text-only via REST API");
+    await client.messages.create({
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to: phone,
+      body: bodyText
+    });
+    if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+
+  } catch (err) {
+    console.error("❌ sendProductMessage error:", err.message);
+    // ✅ Final fallback
+    await sendWhatsAppMessage(phone, bodyText);
+    if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+  }
 }
 
 async function saveSession(phone, data) {
@@ -676,16 +691,13 @@ app.post("/whatsapp", async (req, res) => {
       }
     }
 
-    // ✅ 3. CHECKOUT STEP — COUPON (new step between address and payment)
+    // ✅ 3. CHECKOUT STEP — COUPON
     if (session?.checkout_step === "coupon") {
       const storeId = session.pending_store_id || sessionStoreId;
       const orderTotal = session.pending_order_total || 0;
       const shopName = await getShopName(storeId);
 
-      // ✅ Customer skips coupon
       if (msgUpper === "SKIP" || msgUpper === "NO" || msgLower === "skip" || msgLower === "no") {
-        console.log("🎟️ Coupon skipped by customer");
-
         await supabase
           .from("user_sessions")
           .update({
@@ -696,30 +708,17 @@ app.post("/whatsapp", async (req, res) => {
           .eq("phone_number", phone);
 
         const paymentSettings = await getPaymentSettings(storeId);
-        const codEnabled = paymentSettings?.cod_enabled !== false;
-        const upiEnabled = paymentSettings?.upi_enabled !== false;
-
-        if (!codEnabled && !upiEnabled) {
-          await incrementStoreMessageUsage(storeId, "outgoing");
-          twiml.message(`⚠️ No payment methods available.\n\nPlease contact *${shopName}*.`);
-          return sendTwiml(res, twiml);
-        }
-
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, false));
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Validate coupon code
       const couponCode = msg.trim().toUpperCase();
-      console.log("🎟️ Validating coupon:", couponCode, "for store:", storeId, "orderTotal:", orderTotal);
-
       const result = await validateCoupon(couponCode, storeId, orderTotal);
       console.log("🎟️ Coupon validation result:", JSON.stringify(result));
 
       if (!result.valid) {
         let errorMsg = `⚠️ *Invalid coupon code.*\n\n`;
-
         if (result.reason === "expired") {
           errorMsg = `⏰ *Coupon expired.*\n\nThis offer has ended.\n\n`;
         } else if (result.reason === "not_started") {
@@ -727,7 +726,6 @@ app.post("/whatsapp", async (req, res) => {
         } else if (result.reason === "min_order") {
           errorMsg = `🛍️ *Minimum order required.*\n\nThis coupon requires a minimum order of ₹${result.minOrder}.\nYour cart total is ₹${orderTotal}.\n\n`;
         }
-
         errorMsg += `Type your coupon code to try again, or type *SKIP* to continue without a coupon.`;
 
         await incrementStoreMessageUsage(storeId, "outgoing");
@@ -735,20 +733,12 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ Coupon valid — apply discount
       const discountedTotal = result.finalTotal;
       const discountAmount = result.discountAmount;
+      let discountLabel = result.discountType === "percentage"
+        ? `${result.discountValue}% off`
+        : `₹${result.discountValue} off`;
 
-      let discountLabel = '';
-      if (result.discountType === "percentage") {
-        discountLabel = `${result.discountValue}% off`;
-      } else {
-        discountLabel = `₹${result.discountValue} off`;
-      }
-
-      console.log(`🎟️ Coupon applied: ${couponCode} — discount ₹${discountAmount} — new total ₹${discountedTotal}`);
-
-      // ✅ Save coupon to session and move to payment
       await supabase
         .from("user_sessions")
         .update({
@@ -760,14 +750,6 @@ app.post("/whatsapp", async (req, res) => {
         .eq("phone_number", phone);
 
       const paymentSettings = await getPaymentSettings(storeId);
-      const codEnabled = paymentSettings?.cod_enabled !== false;
-      const upiEnabled = paymentSettings?.upi_enabled !== false;
-
-      if (!codEnabled && !upiEnabled) {
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(`⚠️ No payment methods available.\n\nPlease contact *${shopName}*.`);
-        return sendTwiml(res, twiml);
-      }
 
       await incrementStoreMessageUsage(storeId, "outgoing");
       twiml.message(
@@ -817,9 +799,6 @@ app.post("/whatsapp", async (req, res) => {
         const upiId = paymentSettings?.upi_id;
         const qrCodeUrl = paymentSettings?.qr_code_url;
         const instructions = paymentSettings?.payment_instructions;
-
-        console.log("📱 UPI selected — upi_id:", upiId || "NOT SET");
-        console.log("📷 qr_code_url:", qrCodeUrl || "NOT SET");
 
         if (!upiId) {
           await incrementStoreMessageUsage(storeId, "outgoing");
@@ -908,8 +887,6 @@ app.post("/whatsapp", async (req, res) => {
 
     // ✅ 6. CHECKOUT STEP — NAME + PHONE
     if (session?.checkout_step === "name_phone") {
-      console.log("📝 name_phone step:", msg);
-
       const trimmed = msg.trim();
       const parts = trimmed.split(/\s+/);
       const lastPart = parts[parts.length - 1];
@@ -921,6 +898,7 @@ app.post("/whatsapp", async (req, res) => {
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.message(
           `⚠️ Please send your *name and phone number* together.\n\n` +
+          `Example:\n*Sanjay 9876543210*\n\n` +
           `Type your full name followed by your phone number.`
         );
         return sendTwiml(res, twiml);
@@ -945,7 +923,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 7. CHECKOUT STEP — ADDRESS + PINCODE
+    // ✅ FIX 1 — ADDRESS + PINCODE — removed customer_pincode from session update
     if (session?.checkout_step === "address_pincode") {
       console.log("📍 address_pincode step:", msg);
       console.log("📍 FULL session row at entry:", JSON.stringify(session));
@@ -1034,8 +1012,9 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       const fullAddress = `${address}, ${pincode}`;
+      console.log("📍 Parsed address:", address, "| pincode:", pincode);
 
-      const { data: cartItems, error: cartError } = await supabase
+      const { data: cartItems } = await supabase
         .from("cart")
         .select("*")
         .eq("phone_number", phone);
@@ -1073,8 +1052,7 @@ app.post("/whatsapp", async (req, res) => {
         if (product) orderTotal += product.price * item.quantity;
       }
 
-      // ✅ Check if store has any active coupon offers
-      const now = new Date().toISOString().split('T')[0];
+      // ✅ Check if store has any coupon offers
       const { data: activeOffers } = await supabase
         .from("offers")
         .select("id")
@@ -1084,62 +1062,45 @@ app.post("/whatsapp", async (req, res) => {
         .limit(1);
 
       const hasCoupons = activeOffers && activeOffers.length > 0;
+      const nextStep = hasCoupons ? "coupon" : "payment";
 
-      const { data: addressUpdateData, error: addressUpdateError } = await supabase
+      // ✅ FIX 1 — Only update columns that actually exist in user_sessions
+      // customer_pincode is stored inside fullAddress string, not as separate column
+      // If you ran the SQL above, you can include it; if not, it's safely in fullAddress
+      const sessionUpdatePayload = {
+        customer_address: fullAddress,
+        checkout_step: nextStep,
+        pending_store_id: storeId,
+        pending_order_total: orderTotal
+      };
+
+      // ✅ Try to include customer_pincode — if column doesn't exist it will error
+      // We catch that and retry without it
+      let updateError = null;
+      const { error: firstUpdateError } = await supabase
         .from("user_sessions")
-        .update({
-          customer_address: fullAddress,
-          customer_pincode: pincode,
-          // ✅ If store has coupons, go to coupon step; else go straight to payment
-          checkout_step: hasCoupons ? "coupon" : "payment",
-          pending_store_id: storeId,
-          pending_order_total: orderTotal
-        })
-        .eq("phone_number", phone)
-        .select();
+        .update({ ...sessionUpdatePayload, customer_pincode: pincode })
+        .eq("phone_number", phone);
 
-      console.log("📍 address update data:", addressUpdateData);
-      console.log("📍 address update error:", addressUpdateError);
-
-      let confirmedStep = addressUpdateData && addressUpdateData[0]
-        ? addressUpdateData[0].checkout_step
-        : null;
-
-      if (confirmedStep !== "coupon" && confirmedStep !== "payment") {
-        const { data: recheckSession } = await supabase
+      if (firstUpdateError) {
+        console.log("⚠️ customer_pincode column missing — updating without it:", firstUpdateError.message);
+        const { error: retryError } = await supabase
           .from("user_sessions")
-          .select("checkout_step")
-          .eq("phone_number", phone)
-          .maybeSingle();
-
-        if (recheckSession?.checkout_step !== "coupon" && recheckSession?.checkout_step !== "payment") {
-          const { data: retryData } = await supabase
-            .from("user_sessions")
-            .update({
-              customer_address: fullAddress,
-              customer_pincode: pincode,
-              checkout_step: hasCoupons ? "coupon" : "payment",
-              pending_store_id: storeId,
-              pending_order_total: orderTotal
-            })
-            .eq("phone_number", phone)
-            .select();
-
-          confirmedStep = retryData && retryData[0] ? retryData[0].checkout_step : null;
-        } else {
-          confirmedStep = recheckSession.checkout_step;
-        }
+          .update(sessionUpdatePayload)
+          .eq("phone_number", phone);
+        updateError = retryError;
       }
 
-      if (confirmedStep !== "coupon" && confirmedStep !== "payment") {
+      if (updateError) {
+        console.error("❌ Session update failed:", updateError.message);
         await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(`⚠️ Something went wrong saving your address. Please send your address and pincode again.`);
+        twiml.message(`⚠️ Something went wrong saving your address. Please try again.`);
         return sendTwiml(res, twiml);
       }
 
-      // ✅ If store has coupons, ask for coupon code
+      console.log(`✅ Address saved — step moved to: ${nextStep}`);
+
       if (hasCoupons) {
-        const shopName = await getShopName(storeId);
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(
           `✅ *Address saved!*\n\n` +
@@ -1151,7 +1112,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ No coupons — go straight to payment
       const shopName = await getShopName(storeId);
       const paymentSettings = await getPaymentSettings(storeId);
       const codEnabled = paymentSettings?.cod_enabled !== false;
@@ -1208,7 +1168,6 @@ app.post("/whatsapp", async (req, res) => {
         const shopName = await getShopName(storeId);
         const paymentSettings = await getPaymentSettings(storeId);
 
-        // ✅ Check for active coupons when using saved address too
         const { data: activeOffers } = await supabase
           .from("offers")
           .select("id")
@@ -1412,10 +1371,7 @@ app.post("/whatsapp", async (req, res) => {
       console.log("📦 Delivered orders for history:", deliveredOrders.map(o => ({
         id: o.id,
         status: o.status,
-        payment_amount: o.payment_amount,
-        total_amount: o.total_amount,
-        order_total: o.order_total,
-        total: o.total
+        payment_amount: o.payment_amount
       })));
 
       res.status(200).end();
@@ -1618,7 +1574,8 @@ app.post("/whatsapp", async (req, res) => {
       await incrementStoreMessageUsage(storeId, "outgoing");
       twiml.message(
         `🛍️ *Checkout* — ${cartCheck.length} item${cartCheck.length > 1 ? "s" : ""} in your cart.\n\n` +
-        `👤 Please send your *name and phone number* together.\n\n`
+        `👤 Please send your *name and phone number* together.\n\n` +
+        `Example: *Sanjay 9876543210*`
       );
       return sendTwiml(res, twiml);
     }
@@ -1759,16 +1716,8 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       let lastResults = session.last_results;
-      console.log("🔢 Number selection — raw last_results type:", typeof lastResults, "isArray:", Array.isArray(lastResults));
-      console.log("🔢 selectedNumber (raw msg):", msg, "→ selectedIndex:", selectedIndex);
-
       if (typeof lastResults === "string") {
-        try {
-          lastResults = JSON.parse(lastResults);
-        } catch (e) {
-          console.log("❌ Failed to parse last_results string:", e.message);
-          lastResults = [];
-        }
+        try { lastResults = JSON.parse(lastResults); } catch (e) { lastResults = []; }
       }
 
       if (!Array.isArray(lastResults) || lastResults.length === 0) {
@@ -1791,7 +1740,7 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      const { data: freshProduct, error: freshProductError } = await supabase
+      const { data: freshProduct } = await supabase
         .from("products")
         .select("*")
         .eq("id", sessionProduct.id)
@@ -1805,38 +1754,15 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       await saveSelectedProduct(phone, freshProduct.id);
-
-      const { error: actionStepError } = await supabase
+      await supabase
         .from("user_sessions")
-        .update({
-          action_step: "product_action",
-          last_results: null
-        })
+        .update({ action_step: "product_action", last_results: null })
         .eq("phone_number", phone);
-      if (actionStepError) {
-        console.error("action_step update error:", actionStepError.message);
-      }
 
-      await incrementStoreMessageUsage(freshProduct.store_id || activeStoreId, "outgoing");
-
-      try {
-        await sendProductMessage(twiml, freshProduct);
-      } catch (sendErr) {
-        console.error("sendProductMessage failed:", sendErr.message);
-        const fallbackMsg = twiml.message();
-        fallbackMsg.body(
-          `🛍️ *${freshProduct.product_name}*\n` +
-          `💰 ₹${freshProduct.price}\n` +
-          `📐 Sizes: ${freshProduct.size || 'Free Size'}\n` +
-          `🎨 Color: ${freshProduct.color}\n\n` +
-          `Type *ADD* to add to cart, *CART* to view cart, *CHECKOUT* to checkout.`
-        );
-        if (freshProduct.image_url) {
-          try { fallbackMsg.media(freshProduct.image_url); } catch {}
-        }
-      }
-
-      return sendTwiml(res, twiml);
+      // ✅ FIX 2 — use REST API sendProductMessage, respond 200 first
+      res.status(200).end();
+      await sendProductMessage(phone, freshProduct, freshProduct.store_id || activeStoreId);
+      return;
     }
 
     // ✅ 17. SEARCH
@@ -1864,8 +1790,11 @@ app.post("/whatsapp", async (req, res) => {
         await supabase.from("user_sessions").update({ action_step: null }).eq("phone_number", phone);
         await saveSelectedProduct(phone, data[0].id);
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
-        await incrementStoreMessageUsage(data[0].store_id || activeStoreId, "outgoing");
-        await sendProductMessage(twiml, data[0]);
+
+        // ✅ FIX 2 — single result also uses REST API
+        res.status(200).end();
+        await sendProductMessage(phone, data[0], data[0].store_id || activeStoreId);
+        return;
       } else {
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
 
@@ -1901,7 +1830,6 @@ app.post("/whatsapp", async (req, res) => {
   }
 });
 
-// ✅ placeOrder — saves product_name + price + size as snapshot, includes coupon info
 async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
   try {
     const { data: cartItems } = await supabase
@@ -1922,28 +1850,47 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
     }
 
     const addressStr = session.customer_address || '';
-    const pincodeFromAddress = session.customer_pincode || (addressStr.match(/\b(\d{6})\b/) || [])[1] || null;
+    const pincodeFromAddress = (addressStr.match(/\b(\d{6})\b/) || [])[1] || null;
 
-    const { data: order, error: orderError } = await supabase
+    const orderInsertData = {
+      phone_number: phone,
+      customer_name: session.customer_name,
+      customer_phone: session.customer_phone || null,
+      customer_address: session.customer_address,
+      status: "pending",
+      store_id: storeId,
+      store_order_number: storeOrderNumber,
+      payment_method: paymentMethod,
+      payment_status: paymentStatus,
+      payment_amount: orderTotal,
+      coupon_code: session.applied_coupon_code || null,
+      discount_amount: session.applied_discount_amount || 0,
+      created_at: new Date().toISOString()
+    };
+
+    // ✅ Try with customer_pincode first, fallback without if column missing
+    let order = null;
+    let orderError = null;
+
+    const { data: orderWithPincode, error: errorWithPincode } = await supabase
       .from("orders")
-      .insert({
-        phone_number: phone,
-        customer_name: session.customer_name,
-        customer_phone: session.customer_phone || null,
-        customer_address: session.customer_address,
-        customer_pincode: pincodeFromAddress,
-        status: "pending",
-        store_id: storeId,
-        store_order_number: storeOrderNumber,
-        payment_method: paymentMethod,
-        payment_status: paymentStatus,
-        payment_amount: orderTotal,
-        coupon_code: session.applied_coupon_code || null,
-        discount_amount: session.applied_discount_amount || 0,
-        created_at: new Date().toISOString()
-      })
+      .insert({ ...orderInsertData, customer_pincode: pincodeFromAddress })
       .select()
       .single();
+
+    if (errorWithPincode) {
+      console.log("⚠️ customer_pincode column missing in orders — inserting without it");
+      const { data: orderWithout, error: errorWithout } = await supabase
+        .from("orders")
+        .insert(orderInsertData)
+        .select()
+        .single();
+      order = orderWithout;
+      orderError = errorWithout;
+    } else {
+      order = orderWithPincode;
+      orderError = null;
+    }
 
     if (orderError || !order) {
       console.error("❌ Order error:", orderError?.message);
@@ -1964,7 +1911,6 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
         const itemTotal = product.price * item.quantity;
         orderSummary += `• ${product.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
 
-        // ✅ Save snapshot
         orderItemsToInsert.push({
           order_id: order.id,
           product_id: item.product_id,
@@ -2008,7 +1954,6 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
       formatDate(new Date().toISOString())
     );
 
-    // ✅ Show coupon in order confirmation
     if (session.applied_coupon_code && session.applied_discount_amount > 0) {
       orderMsg += `\n\n🎟️ *Coupon:* ${session.applied_coupon_code} — Saved ₹${session.applied_discount_amount}`;
     }
