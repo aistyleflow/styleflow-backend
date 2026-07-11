@@ -582,6 +582,60 @@ function buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, coupo
   return msg;
 }
 
+// ✅ FIX — reusable coupon-apply logic so a coupon can be applied from
+// CART, from the payment step, or from the dedicated coupon step —
+// not only when hasCoupons happened to be true right after saving address.
+async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, shopName, twiml) {
+  const result = await validateCoupon(couponCode, storeId, orderTotal);
+  console.log("🎟️ Coupon validation result:", JSON.stringify(result));
+
+  if (!result.valid) {
+    let errorMsg = `⚠️ *Invalid coupon code.*\n\n`;
+    if (result.reason === "expired") {
+      errorMsg = `⏰ *Coupon expired.*\n\nThis offer ended on *${result.endDateFormatted}*.\n\n`;
+    } else if (result.reason === "not_started") {
+      errorMsg = `📅 *Coupon not yet active.*\n\nThis offer starts on *${result.startDateFormatted}*.\n\n`;
+    } else if (result.reason === "min_order") {
+      errorMsg = `🛍️ *Minimum order required.*\n\nThis coupon requires a minimum order of ₹${result.minOrder}.\nYour cart total is ₹${orderTotal}.\n\n`;
+    }
+    errorMsg += `Type your coupon code to try again, or type *SKIP* to continue without a coupon.`;
+
+    await incrementStoreMessageUsage(storeId, "outgoing");
+    twiml.message(errorMsg);
+    return { applied: false };
+  }
+
+  const discountedTotal = result.finalTotal;
+  const discountAmount = result.discountAmount;
+  const discountLabel = result.discountType === "percentage"
+    ? `${result.discountValue}% off`
+    : `₹${result.discountValue} off`;
+
+  await supabase
+    .from("user_sessions")
+    .update({
+      checkout_step: "payment",
+      pending_store_id: storeId,
+      pending_order_total: discountedTotal,
+      applied_coupon_code: couponCode,
+      applied_discount_amount: discountAmount
+    })
+    .eq("phone_number", phone);
+
+  const paymentSettings = await getPaymentSettings(storeId);
+
+  await incrementStoreMessageUsage(storeId, "outgoing");
+  twiml.message(
+    `🎉 *Coupon Applied!*\n\n` +
+    `🎟️ Code: *${couponCode}*\n` +
+    `💸 Discount: ${discountLabel} = *−₹${discountAmount}*\n` +
+    `💰 New Total: *₹${discountedTotal}*\n\n` +
+    `─────────────────\n` +
+    buildPaymentOptionsMessage(paymentSettings, discountedTotal, shopName, true)
+  );
+  return { applied: true, discountedTotal, discountAmount };
+}
+
 app.post("/whatsapp", async (req, res) => {
   try {
     const body = req.body;
@@ -673,6 +727,55 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
+    // ✅ FIX — GLOBAL COUPON COMMAND — "COUPON CODE123"
+    // Lets a customer apply a coupon at any point (from CART, from the
+    // payment step, or anytime before an order is placed), not only
+    // during the one-time dedicated coupon step.
+    if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
+      const couponCode = msg.replace(/^coupon:?\s*/i, "").trim().toUpperCase();
+
+      if (!couponCode) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Please type your coupon like this:\n*COUPON YOURCODE*`);
+        return sendTwiml(res, twiml);
+      }
+
+      // Determine store + order total from whichever state we're in
+      let storeId = session?.pending_store_id || sessionStoreId;
+      let orderTotal = session?.pending_order_total || 0;
+
+      const { data: cartItems } = await supabase
+        .from("cart").select("*").eq("phone_number", phone);
+
+      if (!cartItems || cartItems.length === 0) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Your cart is empty!\n\nAdd products first, then apply your coupon.`);
+        return sendTwiml(res, twiml);
+      }
+
+      if (!storeId) {
+        const { data: firstProduct } = await supabase
+          .from("products").select("store_id")
+          .eq("id", cartItems[0].product_id).maybeSingle();
+        if (firstProduct?.store_id) storeId = firstProduct.store_id;
+      }
+
+      // Recompute total fresh from cart if we don't already have one pending
+      if (!orderTotal) {
+        orderTotal = 0;
+        for (const item of cartItems) {
+          const { data: product } = await supabase
+            .from("products").select("price")
+            .eq("id", item.product_id).maybeSingle();
+          if (product) orderTotal += product.price * item.quantity;
+        }
+      }
+
+      const shopName = await getShopName(storeId);
+      await applyCouponAndRespond(phone, couponCode, storeId, orderTotal, shopName, twiml);
+      return sendTwiml(res, twiml);
+    }
+
     // ✅ 1. GREETING
     if (GREETINGS.includes(msgLower)) {
       res.status(200).end();
@@ -740,52 +843,7 @@ app.post("/whatsapp", async (req, res) => {
       }
 
       const couponCode = msg.trim().toUpperCase();
-      const result = await validateCoupon(couponCode, storeId, orderTotal);
-      console.log("🎟️ Coupon validation result:", JSON.stringify(result));
-
-      if (!result.valid) {
-        let errorMsg = `⚠️ *Invalid coupon code.*\n\n`;
-        if (result.reason === "expired") {
-          errorMsg = `⏰ *Coupon expired.*\n\nThis offer ended on *${result.endDateFormatted}*.\n\n`;
-        } else if (result.reason === "not_started") {
-          errorMsg = `📅 *Coupon not yet active.*\n\nThis offer starts on *${result.startDateFormatted}*.\n\n`;
-        } else if (result.reason === "min_order") {
-          errorMsg = `🛍️ *Minimum order required.*\n\nThis coupon requires a minimum order of ₹${result.minOrder}.\nYour cart total is ₹${orderTotal}.\n\n`;
-        }
-        errorMsg += `Type your coupon code to try again, or type *SKIP* to continue without a coupon.`;
-
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(errorMsg);
-        return sendTwiml(res, twiml);
-      }
-
-      const discountedTotal = result.finalTotal;
-      const discountAmount = result.discountAmount;
-      let discountLabel = result.discountType === "percentage"
-        ? `${result.discountValue}% off`
-        : `₹${result.discountValue} off`;
-
-      await supabase
-        .from("user_sessions")
-        .update({
-          checkout_step: "payment",
-          applied_coupon_code: couponCode,
-          applied_discount_amount: discountAmount,
-          pending_order_total: discountedTotal
-        })
-        .eq("phone_number", phone);
-
-      const paymentSettings = await getPaymentSettings(storeId);
-
-      await incrementStoreMessageUsage(storeId, "outgoing");
-      twiml.message(
-        `🎉 *Coupon Applied!*\n\n` +
-        `🎟️ Code: *${couponCode}*\n` +
-        `💸 Discount: ${discountLabel} = *−₹${discountAmount}*\n` +
-        `💰 New Total: *₹${discountedTotal}*\n\n` +
-        `─────────────────\n` +
-        buildPaymentOptionsMessage(paymentSettings, discountedTotal, shopName, true)
-      );
+      await applyCouponAndRespond(phone, couponCode, storeId, orderTotal, shopName, twiml);
       return sendTwiml(res, twiml);
     }
 
@@ -882,8 +940,30 @@ app.post("/whatsapp", async (req, res) => {
         return;
       }
 
+      // ✅ FIX — allow applying/switching a coupon directly from the payment
+      // step too (e.g. "COUPON SAVE20"), in case the customer didn't get it
+      // applied earlier or wants to try a different code.
+      if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
+        const couponCode = msg.replace(/^coupon:?\s*/i, "").trim().toUpperCase();
+        if (!couponCode) {
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.message(`⚠️ Please type your coupon like this:\n*COUPON YOURCODE*`);
+          return sendTwiml(res, twiml);
+        }
+        // Use the pre-discount total if a previous coupon was applied, else current total
+        const baseTotal = session.applied_coupon_code && session.applied_discount_amount
+          ? orderTotal + session.applied_discount_amount
+          : orderTotal;
+        await applyCouponAndRespond(phone, couponCode, storeId, baseTotal, shopName, twiml);
+        return sendTwiml(res, twiml);
+      }
+
       await incrementStoreMessageUsage(storeId, "outgoing");
-      twiml.message(`⚠️ Invalid selection.\n\n` + buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, !!session.applied_coupon_code));
+      twiml.message(
+        `⚠️ Invalid selection.\n\n` +
+        (!session.applied_coupon_code ? `🎟️ Have a coupon? Type *COUPON YOURCODE*\n\n` : ``) +
+        buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, !!session.applied_coupon_code)
+      );
       return sendTwiml(res, twiml);
     }
 
@@ -1542,6 +1622,7 @@ app.post("/whatsapp", async (req, res) => {
       reply += `🧾 *Total: ₹${total}*\n`;
       reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart\n\n`;
       reply += `Type *CHECKOUT* to place your order\n`;
+      reply += `🎟️ Have a coupon? Type *COUPON YOURCODE*\n`;
       reply += `🔍 Or search for more products!`;
 
       await incrementStoreMessageUsage(activeStoreId, "outgoing");
