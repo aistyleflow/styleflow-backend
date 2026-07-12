@@ -2190,21 +2190,34 @@ app.post("/send-offer", async (req, res) => {
       }
     }
 
-    await supabase.from("offers").insert({
-      store_id: storeId,
-      title,
-      description,
-      coupon_code: couponCode || null,
-      image_url: imageUrl || null,
-      audience,
-      sent_count: sentCount,
-      discount_type: discountType || null,
-      discount_value: discountValue || null,
-      minimum_order_amount: minimumOrderAmount || null,
-      start_date: startDate || null,
-      end_date: endDate || null,
-      created_at: new Date().toISOString()
-    });
+    const { data, error } = await supabase
+      .from("offers")
+      .insert({
+        store_id: storeId,
+        title,
+        description,
+        coupon_code: couponCode || null,
+        image_url: imageUrl || null,
+        audience,
+        sent_count: sentCount,
+        discount_type: discountType || null,
+        discount_value: discountValue || null,
+        minimum_order_amount: minimumOrderAmount || null,
+        start_date: startDate || null,
+        end_date: endDate || null,
+        created_at: new Date().toISOString()
+      })
+      .select();
+
+    console.log("Offer insert data:", data);
+    console.log("Offer insert error:", error);
+
+    if (error) {
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
 
     return res.status(200).json({ success: true, sent: sentCount, total: customerPhones.length });
   } catch (err) {
@@ -2220,6 +2233,7 @@ app.get("/products", async (req, res) => {
     if (!data || data.length === 0) return res.status(200).json({ message: "No products found" });
     res.status(200).json(data);
   } catch (error) {
+    console.error("❌ Error:", error.message);
     res.status(500).json({ error: "Something went wrong" });
   }
 });
