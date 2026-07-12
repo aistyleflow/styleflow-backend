@@ -2161,25 +2161,41 @@ app.post("/send-offer", async (req, res) => {
     if (customerPhones.length === 0) return res.status(200).json({ success: true, sent: 0, message: "No customers found" });
 
     let couponDetailsText = '';
+
     if (couponCode) {
+      couponDetailsText += `\n🏷️ Use coupon code: *${couponCode}*`;
+
       if (discountType && discountValue) {
-        const discountLabel = discountType === "percentage"
-          ? `${discountValue}% off`
-          : `₹${discountValue} off`;
+        const discountLabel =
+          discountType === "percentage"
+            ? `${discountValue}% off`
+            : `₹${discountValue} off`;
+
         couponDetailsText += `\n💸 Discount: *${discountLabel}*`;
       }
+
       if (minimumOrderAmount) {
         couponDetailsText += `\n🛍️ Minimum Order: *₹${minimumOrderAmount}*`;
       }
+
       if (startDate) {
         couponDetailsText += `\n📅 Valid From: *${formatDateOnly(startDate)}*`;
       }
+
       if (endDate) {
         couponDetailsText += `\n⏰ Valid Until: *${formatDateOnly(endDate)}*`;
       }
     }
 
-    const offerMessage = messages.offerMessage(shopName, title, description, couponCode) + couponDetailsText;
+    const offerMessage = `🎁 *Special Offer from ${shopName}!*
+
+    *${title}*
+
+    ${description}${couponDetailsText}
+
+    🛍️ Shop now — just type a product name!
+    Happy Shopping! 🎉`;
+    
     let sentCount = 0;
 
     for (const phone of customerPhones) {
