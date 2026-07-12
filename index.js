@@ -2160,42 +2160,47 @@ app.post("/send-offer", async (req, res) => {
 
     if (customerPhones.length === 0) return res.status(200).json({ success: true, sent: 0, message: "No customers found" });
 
-    let couponDetailsText = '';
+    const lines = [
+      `🎁 *Special Offer from ${shopName}!*`,
+      "",
+      `*${title}*`,
+      "",
+      description
+    ];
 
     if (couponCode) {
-      couponDetailsText += `\n🏷️ Use coupon code: *${couponCode}*`;
-
-      if (discountType && discountValue) {
-        const discountLabel =
-          discountType === "percentage"
-            ? `${discountValue}% off`
-            : `₹${discountValue} off`;
-
-        couponDetailsText += `\n💸 Discount: *${discountLabel}*`;
-      }
-
-      if (minimumOrderAmount) {
-        couponDetailsText += `\n🛍️ Minimum Order: *₹${minimumOrderAmount}*`;
-      }
-
-      if (startDate) {
-        couponDetailsText += `\n📅 Valid From: *${formatDateOnly(startDate)}*`;
-      }
-
-      if (endDate) {
-        couponDetailsText += `\n⏰ Valid Until: *${formatDateOnly(endDate)}*`;
-      }
+      lines.push("");
+      lines.push("🏷️ *Coupon Code*");
+      lines.push("```" + couponCode.toUpperCase() + "```");
     }
 
-    const offerMessage = `🎁 *Special Offer from ${shopName}!*
+    if (discountType && discountValue) {
+      const discountLabel =
+        discountType === "percentage"
+          ? `${discountValue}% OFF`
+          : `₹${discountValue} OFF`;
 
-    *${title}*
+      lines.push(`💸 Discount: *${discountLabel}*`);
+    }
 
-    ${description}${couponDetailsText}
+    if (minimumOrderAmount) {
+      lines.push(`🛍️ Minimum Order: *₹${minimumOrderAmount}*`);
+    }
 
-    🛍️ Shop now — just type a product name!
-    Happy Shopping! 🎉`;
-    
+    if (startDate) {
+      lines.push(`📅 Valid From: *${formatDateOnly(startDate)}*`);
+    }
+
+    if (endDate) {
+      lines.push(`⏰ Valid Until: *${formatDateOnly(endDate)}*`);
+    }
+
+    lines.push("");
+    lines.push("🛍️ Shop now — just type a product name!");
+    lines.push("Happy Shopping! 🎉");
+
+    const offerMessage = lines.join("\n");
+
     let sentCount = 0;
 
     for (const phone of customerPhones) {
