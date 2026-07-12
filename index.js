@@ -2170,8 +2170,11 @@ app.post("/send-offer", async (req, res) => {
 
     if (couponCode) {
       lines.push("");
-      lines.push("🏷️ *Coupon Code*");
+      lines.push("🏷️ *Coupon Code: *");
+      lines.push("");
       lines.push("```" + couponCode.toUpperCase() + "```");
+      lines.push("");
+      lines.push("📋 Long press to copy.");
     }
 
     if (discountType && discountValue) {
