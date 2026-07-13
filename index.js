@@ -771,11 +771,7 @@ app.post("/webhook", async (req, res) => {
     const contact = value.contacts?.[0];
 
     // ✅ Extract sender phone and message from Meta payload
-    const phone = metaMessage.from;
-    const msg = metaMessage.text?.body || "";
-    const msgLower = msg.toLowerCase();
-    const msgUpper = msg.toUpperCase();
-
+   
     console.log("=================================");
     console.log("📩 New message received (Meta)");
     console.log("PHONE:", phone);
