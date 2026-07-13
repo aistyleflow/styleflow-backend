@@ -1,18 +1,16 @@
 {
-  "name": "styleflow-backend",
-  "version": "1.0.0",
-  "description": "",
+  "name": "styleflow-whatsapp-bot",
+  "version": "2.0.0",
+  "description": "StyleFlow WhatsApp commerce backend — Meta WhatsApp Cloud API edition",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "@supabase/supabase-js": "^2.107.0",
-    "express": "^5.2.1",
-    "twilio": "^6.0.2"
+    "@supabase/supabase-js": "^2.45.4",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
