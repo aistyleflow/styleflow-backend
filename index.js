@@ -569,7 +569,6 @@ function buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, coupo
     msg += `ℹ️ ${instructions}\n\n`;
   }
 
-  // ✅ CHANGE 1 — always show coupon hint in payment options if no coupon applied yet
   if (!couponApplied) {
     msg += `🎟️ Have a coupon? Type *COUPON YOURCODE*\n\n`;
   }
@@ -628,6 +627,30 @@ async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, sho
   );
   return { applied: true, discountedTotal, discountAmount };
 }
+
+// ✅ CHANGE 1 — Meta Webhook GET verification
+app.get("/webhook", (req, res) => {
+  const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
+
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    console.log("✅ Meta Webhook Verified");
+    return res.status(200).send(challenge);
+  }
+
+  return res.sendStatus(403);
+});
+
+// ✅ CHANGE 2 — Meta Webhook POST receiver
+app.post("/webhook", async (req, res) => {
+  console.log("📩 Meta Incoming:");
+  console.log(JSON.stringify(req.body, null, 2));
+
+  res.sendStatus(200);
+});
 
 app.post("/whatsapp", async (req, res) => {
   try {
@@ -927,8 +950,6 @@ app.post("/whatsapp", async (req, res) => {
         return;
       }
 
-      // ✅ CHANGE 2 — handle coupon code typed directly at payment step
-      // Customer can type just the code itself (not just "COUPON CODE") at payment
       if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
         const couponCode = msg.replace(/^coupon:?\s*/i, "").trim().toUpperCase();
         if (!couponCode) {
@@ -936,7 +957,6 @@ app.post("/whatsapp", async (req, res) => {
           twiml.message(`⚠️ Please type your coupon like this:\n*COUPON SAVE20*`);
           return sendTwiml(res, twiml);
         }
-        // If a coupon was previously applied, recompute against original total
         const baseTotal = session.applied_coupon_code && session.applied_discount_amount
           ? orderTotal + Number(session.applied_discount_amount)
           : orderTotal;
@@ -944,7 +964,6 @@ app.post("/whatsapp", async (req, res) => {
         return sendTwiml(res, twiml);
       }
 
-      // ✅ CHANGE 3 — invalid selection at payment shows clear coupon option
       await incrementStoreMessageUsage(storeId, "outgoing");
       twiml.message(
         `⚠️ Invalid selection.\n\n` +
@@ -1177,7 +1196,6 @@ app.post("/whatsapp", async (req, res) => {
 
       console.log(`✅ Address saved — step moved to: ${nextStep}`);
 
-      // ✅ CHANGE 3 — cleaner coupon prompt with cart total visible
       await incrementStoreMessageUsage(storeId, "outgoing");
       twiml.message(
         `✅ *Address saved!*\n\n` +
@@ -1239,7 +1257,6 @@ app.post("/whatsapp", async (req, res) => {
           })
           .eq("phone_number", phone);
 
-        // ✅ CHANGE 3 — same cleaner coupon prompt here too
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(
           `✅ *Address confirmed!*\n\n` +
