@@ -1,5 +1,4 @@
 const express = require("express");
-const twilio = require("twilio");
 const { createClient } = require("@supabase/supabase-js");
 const messages = require("./helpers/messageTemplates");
 
@@ -16,15 +15,19 @@ app.use((req, res, next) => {
   next();
 });
 
-const client = twilio(
-  process.env.TWILIO_ACCOUNT_SID,
-  process.env.TWILIO_AUTH_TOKEN
-);
-
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_ANON_KEY
 );
+
+// ─────────────────────────────────────────────────────────
+// META WHATSAPP CLOUD API CONFIG
+// ─────────────────────────────────────────────────────────
+const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+const META_PHONE_NUMBER_ID = process.env.META_PHONE_NUMBER_ID;
+const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
+const META_GRAPH_VERSION = "v20.0";
+const META_GRAPH_URL = `https://graph.facebook.com/${META_GRAPH_VERSION}/${META_PHONE_NUMBER_ID}/messages`;
 
 const GREETINGS = ["hi", "hello", "hey", "helo", "hii", "start", "namaste"];
 
@@ -395,17 +398,9 @@ app.get("/", (req, res) => {
   res.send("StyleFlow is running!");
 });
 
-app.get("/whatsapp", (req, res) => {
-  const VERIFY_TOKEN = "styleflow_token";
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
-    res.status(200).send(challenge);
-  } else {
-    res.status(200).send("WhatsApp webhook is active!");
-  }
-});
+// ─────────────────────────────────────────────────────────
+// META WHATSAPP CLOUD API — MESSAGE SENDING HELPERS
+// ─────────────────────────────────────────────────────────
 
 async function isImageAccessible(url) {
   try {
@@ -419,19 +414,72 @@ async function isImageAccessible(url) {
   }
 }
 
-async function sendWhatsAppMessage(to, messageBody) {
+// Normalizes a phone value coming from either Meta ("91xxxxxxxxxx")
+// or older stored data (possibly prefixed "whatsapp:+91xxxxxxxxxx")
+// into the raw MSISDN Meta expects in the "to" field.
+function toMetaPhone(phone) {
+  if (!phone) return phone;
+  return phone.replace(/^whatsapp:/, "").replace(/^\+/, "");
+}
+
+async function metaGraphRequest(payload) {
   try {
-    const message = await client.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: to,
-      body: messageBody
+    const response = await fetch(META_GRAPH_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${META_ACCESS_TOKEN}`
+      },
+      body: JSON.stringify(payload)
     });
-    console.log("✅ Message sent — SID:", message.sid);
-    return true;
+
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      console.error("❌ Meta API error:", response.status, JSON.stringify(data));
+      return { success: false, status: response.status, data };
+    }
+
+    console.log("✅ Meta message sent — id:", data?.messages?.[0]?.id);
+    return { success: true, status: response.status, data };
   } catch (err) {
-    console.error("❌ REST API send error:", err.message);
-    return false;
+    console.error("❌ Meta API request failed:", err.message);
+    return { success: false, error: err.message };
   }
+}
+
+async function sendWhatsAppMessage(to, messageBody) {
+  const payload = {
+    messaging_product: "whatsapp",
+    to: toMetaPhone(to),
+    type: "text",
+    text: { body: messageBody, preview_url: false }
+  };
+
+  console.log("📤 Outgoing Meta text request → to:", toMetaPhone(to));
+  const result = await metaGraphRequest(payload);
+  return result.success;
+}
+
+async function sendWhatsAppImageMessage(to, imageUrl, caption) {
+  const payload = {
+    messaging_product: "whatsapp",
+    to: toMetaPhone(to),
+    type: "image",
+    image: {
+      link: imageUrl,
+      caption: caption || ""
+    }
+  };
+
+  console.log("📤 Outgoing Meta image request → to:", toMetaPhone(to), "url:", imageUrl);
+  const result = await metaGraphRequest(payload);
+
+  if (!result.success) {
+    console.error("❌ Media send failed, falling back to text:", JSON.stringify(result.data || result.error));
+  }
+
+  return result.success;
 }
 
 async function sendProductMessage(phone, product, storeId) {
@@ -454,25 +502,19 @@ async function sendProductMessage(phone, product, storeId) {
     if (product.image_url && product.image_url.trim() !== '') {
       const accessible = await isImageAccessible(product.image_url);
       if (accessible) {
-        console.log("📷 Sending product with image via REST API");
-        await client.messages.create({
-          from: process.env.TWILIO_WHATSAPP_NUMBER,
-          to: phone,
-          body: bodyText,
-          mediaUrl: [product.image_url]
-        });
-        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-        return;
+        console.log("📷 Sending product with image via Meta Cloud API");
+        const sent = await sendWhatsAppImageMessage(phone, product.image_url, bodyText);
+        if (sent) {
+          if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+          return;
+        }
+        console.log("⚠️ Image send failed — falling back to text only");
       } else {
         console.log("⚠️ Image not accessible — sending text only");
       }
     }
-    console.log("📝 Sending product text-only via REST API");
-    await client.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: phone,
-      body: bodyText
-    });
+    console.log("📝 Sending product text-only via Meta Cloud API");
+    await sendWhatsAppMessage(phone, bodyText);
     if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
   } catch (err) {
     console.error("❌ sendProductMessage error:", err.message);
@@ -529,10 +571,34 @@ async function saveSelectedProduct(phone, productId) {
   }
 }
 
-function sendTwiml(res, twiml) {
-  const xml = twiml.toString();
-  res.setHeader("Content-Type", "text/xml");
-  res.status(200).send(xml);
+// ─────────────────────────────────────────────────────────
+// REPLY QUEUE — replaces Twilio's TwiML <Message> response.
+// Meta's Cloud API has no "reply inline with the webhook ack"
+// concept — every outbound message is its own Graph API call.
+// This tiny shim lets the business logic below keep calling
+// `twiml.message("...")` unchanged; we simply queue the text
+// and flush it as real Meta API sends once the handler is done.
+// ─────────────────────────────────────────────────────────
+function createReplyQueue(phone, storeIdRef) {
+  const queue = [];
+  return {
+    message(text) {
+      queue.push(text);
+    },
+    async flush() {
+      for (const text of queue) {
+        await sendWhatsAppMessage(phone, text);
+      }
+    }
+  };
+}
+
+// No-op replacement for the old sendTwiml(res, twiml) — Meta webhooks
+// must be ack'd immediately with 200 and contain no body; actual
+// replies go out asynchronously via the Graph API.
+async function sendTwiml(res, twiml) {
+  await twiml.flush();
+  if (!res.headersSent) res.status(200).end();
 }
 
 function buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, couponApplied) {
@@ -628,40 +694,83 @@ async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, sho
   return { applied: true, discountedTotal, discountAmount };
 }
 
-// ✅ Meta Webhook GET — verification
+// ─────────────────────────────────────────────────────────
+// META WEBHOOK — GET verification
+// ─────────────────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
-  const VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  if (mode === "subscribe" && token === VERIFY_TOKEN) {
+  console.log("🔐 Webhook verification attempt — mode:", mode);
+
+  if (mode === "subscribe" && token === META_VERIFY_TOKEN) {
     console.log("✅ Meta Webhook Verified");
     return res.status(200).send(challenge);
   }
 
+  console.error("❌ Meta Webhook verification failed — token mismatch");
   return res.sendStatus(403);
 });
 
-// ✅ Meta Webhook POST — FIX: define phone/msg variables from metaMessage.from
+// ─────────────────────────────────────────────────────────
+// META WEBHOOK — POST receiver (replaces app.post("/whatsapp"))
+// Parses the Meta Cloud API payload into the same internal
+// variables (phone, msg, session, etc.) the business logic uses,
+// so all downstream logic below is unchanged from the Twilio version.
+// ─────────────────────────────────────────────────────────
 app.post("/webhook", async (req, res) => {
   try {
+    const body = req.body;
+    console.log("📩 Meta Incoming webhook:", JSON.stringify(body));
+
+    // Always ack immediately — Meta requires a fast 200 or it retries/backoffs.
     res.sendStatus(200);
 
-    const body = req.body;
+    const entry = body?.entry?.[0];
+    const change = entry?.changes?.[0];
+    const value = change?.value;
 
-    if (body.object !== "whatsapp_business_account") return;
+    // Ignore status callbacks (sent/delivered/read receipts) — no message to process.
+    if (!value?.messages || value.messages.length === 0) {
+      if (value?.statuses) {
+        console.log("ℹ️ Status callback received (delivery/read receipt) — ignoring.");
+      }
+      return;
+    }
 
-    const entry = body.entry?.[0];
-    const changes = entry?.changes?.[0];
-    const value = changes?.value;
-    const metaMessages = value?.messages;
+    const metaMessage = value.messages[0];
+    
 
-    if (!metaMessages || metaMessages.length === 0) return;
+    // Normalize to the same "phone" shape the rest of the app expects.
+    // Meta gives raw MSISDN (e.g. "919876543210"); we keep it consistent internally.
+    const phone = metaMessage.from;
 
-    const metaMessage = metaMessages[0];
+    // Extract message text depending on message type.
+    let msg = "";
+    if (metaMessage.type === "text") {
+      msg = metaMessage.text?.body ? metaMessage.text.body.trim() : "";
+    } else if (metaMessage.type === "interactive") {
+      const interactive = metaMessage.interactive;
+      if (interactive?.button_reply) {
+        msg = interactive.button_reply.title || interactive.button_reply.id || "";
+      } else if (interactive?.list_reply) {
+        msg = interactive.list_reply.title || interactive.list_reply.id || "";
+      }
+      msg = msg.trim();
+    } else if (metaMessage.type === "button") {
+      msg = (metaMessage.button?.text || "").trim();
+    } else {
+      console.log("ℹ️ Unsupported message type received:", metaMessage.type);
+      await sendWhatsAppMessage(phone, `⚠️ Sorry, we only support text messages right now.`);
+      return;
+    }
 
-    // ✅ FIX — define all 4 variables from metaMessage.from (not contact)
+    const msgLower = msg.toLowerCase();
+    const msgUpper = msg.toUpperCase();
+    const contact = value.contacts?.[0];
+
+    // ✅ Extract sender phone and message from Meta payload
     const phone = metaMessage.from;
     const msg = metaMessage.text?.body || "";
     const msgLower = msg.toLowerCase();
@@ -673,35 +782,33 @@ app.post("/webhook", async (req, res) => {
     console.log("MESSAGE:", msg);
     console.log("=================================");
 
-    if (!phone || !msg) return;
+    // Ignore empty messages
+    if (!phone || !msg) {
+      console.log("⚠️ Empty phone or message received");
+      return;
+    }
 
-    // ✅ Pass all 4 variables into processIncomingMessage
+    // Continue into your existing business logic
     await processIncomingMessage(phone, msg, msgLower, msgUpper);
 
-  } catch (err) {
-    console.error("❌ Meta webhook error:", err.message);
+  } catch (error) {
+    console.error("❌ /webhook error:", error.stack || error.message);
+    if (!res.headersSent) res.sendStatus(200); // still ack to avoid Meta retry storms
   }
 });
 
-app.post("/whatsapp", async (req, res) => {
+// ─────────────────────────────────────────────────────────
+// CORE BUSINESS LOGIC — identical behavior to the original
+// Twilio app.post("/whatsapp") handler. Only the transport
+// (how phone/msg arrive, and how replies are sent) changed.
+// twiml.message(...) now queues a Meta text reply, flushed by sendTwiml().
+// ─────────────────────────────────────────────────────────
+async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
+  const fakeRes = { headersSent: false, status() { return this; }, end() {}, json() {} };
+  const res = fakeRes;
+
   try {
-    const body = req.body;
-    if (!body) return res.status(400).end();
-
-    const phone = body.From;
-    const msg = body.Body ? body.Body.trim() : "";
-    const msgLower = msg.toLowerCase();
-    const msgUpper = msg.toUpperCase();
-
-    console.log("=================================");
-    console.log("📩 New message received");
-    console.log("PHONE:", phone);
-    console.log("MESSAGE:", msg);
-    console.log("=================================");
-
-    if (!phone || !msg) return res.status(400).end();
-
-    const twiml = new twilio.twiml.MessagingResponse();
+    const twiml = createReplyQueue(phone);
 
     const { data: session } = await supabase
       .from("user_sessions")
@@ -774,7 +881,7 @@ app.post("/whatsapp", async (req, res) => {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ GLOBAL COUPON COMMAND
+    // ✅ GLOBAL COUPON COMMAND — "COUPON CODE123" from anywhere
     if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
       const couponCode = msg.replace(/^coupon:?\s*/i, "").trim().toUpperCase();
 
@@ -820,8 +927,6 @@ app.post("/whatsapp", async (req, res) => {
 
     // ✅ 1. GREETING
     if (GREETINGS.includes(msgLower)) {
-      res.status(200).end();
-
       let storeId = sessionStoreId;
       if (!storeId) {
         storeId = await getStoreIdForCustomer(phone);
@@ -851,7 +956,6 @@ app.post("/whatsapp", async (req, res) => {
       if (storeByCode) {
         await saveStoreToSession(phone, storeByCode.id);
         await incrementStoreMessageUsage(storeByCode.id, "incoming");
-        res.status(200).end();
         await incrementStoreMessageUsage(storeByCode.id, "outgoing");
         await sendWhatsAppMessage(
           phone,
@@ -953,22 +1057,20 @@ app.post("/whatsapp", async (req, res) => {
 
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(upiMsg);
-        sendTwiml(res, twiml);
+        await sendTwiml(res, twiml);
 
         if (qrCodeUrl) {
           const accessible = await isImageAccessible(qrCodeUrl);
           if (accessible) {
-            try {
-              const qrMessage = await client.messages.create({
-                from: process.env.TWILIO_WHATSAPP_NUMBER,
-                to: phone,
-                body: `📷 *Scan to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`,
-                mediaUrl: [qrCodeUrl]
-              });
-              console.log("✅ QR sent — SID:", qrMessage.sid);
+            const qrSent = await sendWhatsAppImageMessage(
+              phone,
+              qrCodeUrl,
+              `📷 *Scan to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`
+            );
+            if (qrSent) {
               await incrementStoreMessageUsage(storeId, "outgoing");
-            } catch (qrErr) {
-              console.error("❌ QR send failed:", qrErr.message);
+            } else {
+              console.error("❌ QR send failed via Meta API");
               await sendWhatsAppMessage(phone, `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
               await incrementStoreMessageUsage(storeId, "outgoing");
             }
@@ -1469,8 +1571,6 @@ app.post("/whatsapp", async (req, res) => {
         payment_amount: o.payment_amount
       })));
 
-      res.status(200).end();
-
       const historyStoreId = orders[0]?.store_id || activeStoreId;
 
       await incrementStoreMessageUsage(historyStoreId, "outgoing");
@@ -1855,7 +1955,6 @@ app.post("/whatsapp", async (req, res) => {
         .update({ action_step: "product_action", last_results: null })
         .eq("phone_number", phone);
 
-      res.status(200).end();
       await sendProductMessage(phone, freshProduct, freshProduct.store_id || activeStoreId);
       return;
     }
@@ -1885,7 +1984,6 @@ app.post("/whatsapp", async (req, res) => {
         await supabase.from("user_sessions").update({ action_step: null }).eq("phone_number", phone);
         await saveSelectedProduct(phone, data[0].id);
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
-        res.status(200).end();
         await sendProductMessage(phone, data[0], data[0].store_id || activeStoreId);
         return;
       } else {
@@ -1913,21 +2011,11 @@ app.post("/whatsapp", async (req, res) => {
   } catch (error) {
     console.error("❌ Error:", error.stack || error.message);
     try {
-      const twiml = new twilio.twiml.MessagingResponse();
-      twiml.message(`⚠️ Something went wrong on our end. Please try again in a moment!`);
-      return sendTwiml(res, twiml);
+      await sendWhatsAppMessage(phone, `⚠️ Something went wrong on our end. Please try again in a moment!`);
     } catch (fallbackErr) {
       console.error("❌ Fallback reply also failed:", fallbackErr.message);
-      return res.status(500).end();
     }
   }
-});
-
-async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
-  // Placeholder for shared message processing logic
-  // Currently all logic lives in app.post("/whatsapp")
-  // This will be expanded when Meta integration is fully wired
-  console.log(`📲 processIncomingMessage called — phone: ${phone}, msg: ${msg}`);
 }
 
 async function placeOrder(phone, session, storeId, orderTotal, shopName, paymentMethod, paymentStatus, res, twiml) {
@@ -2069,7 +2157,7 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
 
     await incrementStoreMessageUsage(storeId, "outgoing");
     twiml.message(orderMsg);
-    sendTwiml(res, twiml);
+    await sendTwiml(res, twiml);
 
     if (paymentMethod === "UPI" && paymentStatus === "awaiting_verification") {
       const { data: storeOwner } = await supabase
@@ -2081,7 +2169,7 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
       if (storeOwner?.phone_number) {
         await incrementStoreMessageUsage(storeId, "outgoing");
         await sendWhatsAppMessage(
-          `whatsapp:${storeOwner.phone_number}`,
+          storeOwner.phone_number,
           `💳 *UPI Payment — Verify Required*\n\n` +
           `🆔 Order #${storeOrderNumber}\n` +
           `👤 Customer: ${session.customer_name}\n` +
@@ -2225,16 +2313,18 @@ app.post("/send-offer", async (req, res) => {
 
     if (couponCode) {
       lines.push("");
-      lines.push("🏷️ *Coupon Code:*");
+      lines.push("🏷️ *Coupon Code: *");
       lines.push("");
       lines.push("```" + couponCode.toUpperCase() + "```");
       lines.push("");
     }
 
     if (discountType && discountValue) {
-      const discountLabel = discountType === "percentage"
-        ? `${discountValue}% OFF`
-        : `₹${discountValue} OFF`;
+      const discountLabel =
+        discountType === "percentage"
+          ? `${discountValue}% OFF`
+          : `₹${discountValue} OFF`;
+
       lines.push(`💸 Discount: *${discountLabel}*`);
     }
 
@@ -2255,6 +2345,7 @@ app.post("/send-offer", async (req, res) => {
     lines.push("Happy Shopping! 🎉");
 
     const offerMessage = lines.join("\n");
+
     let sentCount = 0;
 
     for (const phone of customerPhones) {
@@ -2288,7 +2379,10 @@ app.post("/send-offer", async (req, res) => {
     console.log("Offer insert error:", error);
 
     if (error) {
-      return res.status(500).json({ success: false, error: error.message });
+      return res.status(500).json({
+        success: false,
+        error: error.message
+      });
     }
 
     return res.status(200).json({ success: true, sent: sentCount, total: customerPhones.length });
