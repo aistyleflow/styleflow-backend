@@ -418,8 +418,25 @@ async function isImageAccessible(url) {
 // or older stored data (possibly prefixed "whatsapp:+91xxxxxxxxxx")
 // into the raw MSISDN Meta expects in the "to" field.
 function toMetaPhone(phone) {
-  if (!phone) return phone;
-  return phone.replace(/^whatsapp:/, "").replace(/^\+/, "");
+  if (!phone) return "";
+
+  let clean = phone.toString().trim();
+
+  // Remove "whatsapp:" if present
+  clean = clean.replace(/^whatsapp:/, "");
+
+  // Remove spaces, hyphens and brackets
+  clean = clean.replace(/[\s\-()]/g, "");
+
+  // Remove leading +
+  clean = clean.replace(/^\+/, "");
+
+  // If it's a 10-digit Indian number, add country code
+  if (clean.length === 10) {
+    clean = "91" + clean;
+  }
+
+  return clean;
 }
 
 async function metaGraphRequest(payload) {
