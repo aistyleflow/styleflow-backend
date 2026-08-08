@@ -894,6 +894,10 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     // ✅ GLOBAL COUPON COMMAND — "COUPON CODE123" from anywhere
     if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
       const couponCode = msg.replace(/^coupon:?\s*/i, "").trim();
+
+      if (!couponCode) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Please type your coupon like this:\n*COUPON YOURCODE*`);
         return sendTwiml(res, twiml);
       }
 
