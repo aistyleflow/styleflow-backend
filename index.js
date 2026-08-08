@@ -954,7 +954,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         await incrementStoreMessageUsage(storeId, "outgoing");
         await sendWhatsAppMessage(
           phone,
-          `👋 Welcome to *${shopName}*! 🛍️\n\nWe are your personal fashion assistant.\n\n🔍 *How to shop:*\nJust type what you are looking for!\n\nExamples:\n• Type *Black* to see black products\n• Type *Jeans* to see all jeans\n\n📦 Type *ORDER STATUS* to check latest order\n📋 Type *ORDER HISTORY* to see all orders\n\nHappy Shopping! 🎉`
+          `👋 Welcome to *${shopName}*! 🛍️\n\nWe are your personal fashion assistant.\n\n🔍 *How to shop:*\nJust type what you are looking for!\n\nExamples:\n• Type *Black* to see black products\n• Type *Jeans* to see all jeans\n\n📦 Type *ORDER STATUS* to check latest order\n\nHappy Shopping! 🎉`
         );
       }
       return;
@@ -969,7 +969,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         await incrementStoreMessageUsage(storeByCode.id, "outgoing");
         await sendWhatsAppMessage(
           phone,
-          `✅ *${storeByCode.shop_name}* store selected!\n\n👋 Welcome! We are your personal fashion assistant.\n\n🔍 *How to shop:*\nJust type what you are looking for!\n\nExamples:\n• Type *Black* to see black products\n• Type *Jeans* to see all jeans\n\n📦 Type *ORDER STATUS* to check latest order\n📋 Type *ORDER HISTORY* to see all orders\n\nHappy Shopping! 🎉`
+          `✅ *${storeByCode.shop_name}* store selected!\n\n👋 Welcome! We are your personal fashion assistant.\n\n🔍 *How to shop:*\nJust type what you are looking for!\n\nExamples:\n• Type *Black* to see black products\n• Type *Jeans* to see all jeans\n\n📦 Type *ORDER STATUS* to check latest order\n\nHappy Shopping! 🎉`
         );
         return;
       }
@@ -1545,81 +1545,12 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `🛍️ *Items:*\n${itemsText}\n\n` +
         `👤 ${order.customer_name || 'N/A'}\n` +
         `📍 ${order.customer_address || 'N/A'}\n` +
-        `🕐 ${formatDate(order.created_at)}\n\n` +
-        `📋 Type *ORDER HISTORY* to see all orders`
+        `🕐 ${formatDate(order.created_at)}`
       );
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 11. ORDER HISTORY
-    if (msgUpper === "ORDER HISTORY" || msgUpper === "MY ORDERS" || msgUpper === "HISTORY") {
-      const { data: orders } = await supabase
-        .from("orders")
-        .select("*")
-        .eq("phone_number", phone)
-        .order("id", { ascending: false });
-
-      if (!orders || orders.length === 0) {
-        await incrementStoreMessageUsage(activeStoreId, "outgoing");
-        twiml.message(`📋 *No order history found!*\n\nYou have not placed any orders yet.\n\nSearch for products to start shopping! 🛍️`);
-        return sendTwiml(res, twiml);
-      }
-
-      const deliveredOrders = orders.filter(
-        o => o.status && o.status.toLowerCase() === "delivered"
-      );
-
-      const totalSpent = deliveredOrders.reduce(
-        (sum, o) =>
-          sum + Number(o.payment_amount || o.total_amount || o.order_total || o.total || 0),
-        0
-      );
-
-      console.log("📦 Delivered orders for history:", deliveredOrders.map(o => ({
-        id: o.id,
-        status: o.status,
-        payment_amount: o.payment_amount
-      })));
-
-      const historyStoreId = orders[0]?.store_id || activeStoreId;
-
-      await incrementStoreMessageUsage(historyStoreId, "outgoing");
-      await sendWhatsAppMessage(
-        phone,
-        `📋 *Your Order History*\n(${orders.length} order${orders.length > 1 ? 's' : ''})\n\n` +
-        `💰 *Total Spent: ₹${totalSpent}*\n_(from ${deliveredOrders.length} delivered order${deliveredOrders.length !== 1 ? 's' : ''})_\n\n` +
-        `─────────────────`
-      );
-
-      for (let i = 0; i < orders.length; i++) {
-        const order = orders[i];
-        const emoji = getStatusEmoji(order.status);
-        const itemsText = await getOrderItems(order.id);
-
-        await incrementStoreMessageUsage(order.store_id || historyStoreId, "outgoing");
-        await sendWhatsAppMessage(
-          phone,
-          `🆔 Order #${order.store_order_number || order.id}\n` +
-          `${emoji} *${order.status.toUpperCase()}*\n` +
-          `💳 Payment: *${order.payment_method || 'N/A'}* — ${order.payment_status || 'N/A'}\n` +
-          `🕐 ${formatDate(order.created_at)}\n\n` +
-          `🛍️ *Items:*\n${itemsText}\n\n` +
-          `👤 ${order.customer_name || 'N/A'}\n` +
-          `📍 ${order.customer_address || 'N/A'}\n` +
-          `─────────────────`
-        );
-      }
-
-      await incrementStoreMessageUsage(historyStoreId, "outgoing");
-      await sendWhatsAppMessage(
-        phone,
-        `📦 Type *ORDER STATUS* to check latest order\n🛍️ Search products to continue shopping!`
-      );
-
-      return;
-    }
-
-    // ✅ 12. ADD — top level
+    // ✅ 11. ADD — top level
     if (msgUpper === "ADD") {
       if (!session?.selected_product_id) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -1687,7 +1618,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 13. CART — top level
+    // ✅ 12. CART — top level
     if (msgUpper === "CART") {
       const { data: cartItems } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
@@ -1729,7 +1660,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 14. CHECKOUT — top level
+    // ✅ 13. CHECKOUT — top level
     if (msgUpper === "CHECKOUT") {
       const { data: cartCheck } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
@@ -1786,7 +1717,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       return sendTwiml(res, twiml);
     }
 
-    // ✅ 15. ACTION STEP
+    // ✅ 14. ACTION STEP
     if (session?.action_step === "product_action") {
       if (msgUpper === "ADD") {
         if (!session?.selected_product_id) {
@@ -1909,7 +1840,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       }
     }
 
-    // ✅ 16. NUMBER CHECK
+    // ✅ 15. NUMBER CHECK
     const isNumber = /^[0-9]+$/.test(msg);
 
     if (isNumber) {
@@ -1969,7 +1900,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       return;
     }
 
-    // ✅ 17. SEARCH
+    // ✅ 16. SEARCH
     console.log(`🔍 Searching: "${msg}" — store_id: ${sessionStoreId || 'none'}`);
 
     if (!sessionStoreId) {
