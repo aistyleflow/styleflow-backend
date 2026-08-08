@@ -332,7 +332,7 @@ async function validateCoupon(couponCode, storeId, orderTotal) {
       .from("offers")
       .select("*")
       .eq("store_id", storeId)
-      .eq("coupon_code", couponCode.toUpperCase().trim())
+      .eq("coupon_code", couponCode.trim())
       .maybeSingle();
 
     if (error || !offer) {
@@ -893,11 +893,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
     // ✅ GLOBAL COUPON COMMAND — "COUPON CODE123" from anywhere
     if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
-      const couponCode = msg.replace(/^coupon:?\s*/i, "").trim().toUpperCase();
-
-      if (!couponCode) {
-        await incrementStoreMessageUsage(activeStoreId, "outgoing");
-        twiml.message(`⚠️ Please type your coupon like this:\n*COUPON YOURCODE*`);
+      const couponCode = msg.replace(/^coupon:?\s*/i, "").trim();
         return sendTwiml(res, twiml);
       }
 
@@ -997,7 +993,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         return sendTwiml(res, twiml);
       }
 
-      const couponCode = msg.trim().toUpperCase();
+      const couponCode = msg.trim();
       await applyCouponAndRespond(phone, couponCode, storeId, orderTotal, shopName, twiml);
       return sendTwiml(res, twiml);
     }
@@ -1094,7 +1090,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       }
 
       if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
-        const couponCode = msg.replace(/^coupon:?\s*/i, "").trim().toUpperCase();
+        const couponCode = msg.replace(/^coupon:?\s*/i, "").trim();
         if (!couponCode) {
           await incrementStoreMessageUsage(storeId, "outgoing");
           twiml.message(`⚠️ Please type your coupon like this:\n*COUPON SAVE20*`);
