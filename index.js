@@ -704,15 +704,6 @@ async function downloadMetaMedia(mediaId) {
   }
 }
 
-// Phase 2 placeholder — sends audio to the AI speech-understanding
-// service and returns structured output only:
-// { product_query, size, quantity }
-// AI is never the source of truth for price/stock/product ID.
-async function understandVoiceOrder(mediaUrl) {
-  console.log("ℹ️ understandVoiceOrder called — Phase 3 not yet implemented");
-  return null;
-}
-
 // Phase 2 placeholder — validates/normalizes the AI's structured output
 // before it's used to search the existing products table.
 function extractVoiceOrderDetails(aiResult) {
