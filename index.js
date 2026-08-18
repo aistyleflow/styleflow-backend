@@ -1,6 +1,7 @@
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 const messages = require("./helpers/messageTemplates");
+const { understandVoiceOrder } = require("./voiceAI");
 
 const app = express();
 
@@ -600,13 +601,18 @@ async function handleIncomingAudio(phone, metaMessage) {
 
     console.log("✅ Audio downloaded successfully");
 
-    // Phase 1/2 stop here: the audio buffer (audioResult.audioBuffer) and
-    // its mimeType are captured and held in memory for this request only.
-    // Phase 3 will pass audioResult into understandVoiceOrder(...) →
-    // extractVoiceOrderDetails(...) → matchProductFromVoiceRequest(...)
-    // (Phase 6 connection point, already prepared below) →
-    // sendVoiceOrderConfirmation(...), then reuse existing cart/order logic.
+    // ── PHASE 3: Send downloaded audio to Gemini ──
+    const voiceResult = await understandVoiceOrder(
+      audioResult.audioBuffer,
+      audioResult.mimeType
+    );
 
+    console.log("📋 Voice AI result:", voiceResult);
+
+    // Phase 3 stops here.
+    // Do NOT create an order or modify the cart yet.
+
+    
     await sendWhatsAppMessage(
       phone,
       `🎙️ Got your voice message! Voice ordering is coming soon.\n\nFor now, please type what you're looking for — for example: *Blue Jeans*.`
