@@ -609,9 +609,31 @@ async function handleIncomingAudio(phone, metaMessage) {
 
     console.log("📋 Voice AI result:", voiceResult);
 
+    if (!voiceResult || !voiceResult.understood) {
+      await sendTextMessage(
+        from,
+        "Sorry, I couldn't understand your voice message clearly. Please try again."
+      );
+      return;
+    }
+
+    const product = voiceResult.product_query || "Not specified";
+    const size = voiceResult.size || "Not specified";
+    const quantity = voiceResult.quantity || "Not specified";
+
+    await sendTextMessage(
+      from,
+      `🎙️ I understood your request:\n\n` +
+      `Product: ${product}\n` +
+      `Size: ${size}\n` +
+      `Quantity: ${quantity}\n\n` +
+      `Voice understanding is working!`
+    );
+
+    return;
+
     // Phase 3 stops here.
     // Do NOT create an order or modify the cart yet.
-
     
     await sendWhatsAppMessage(
       phone,
