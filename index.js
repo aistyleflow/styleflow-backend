@@ -561,6 +561,13 @@ async function sendProductMessage(phone, product, storeId) {
 // Called from the webhook's message-type branch, parallel to
 // the existing text/interactive/button handling — does not
 // touch processIncomingMessage or any existing text-order logic.
+//
+// PHASE 2 UPDATE: this now actually resolves the Meta media URL and
+// downloads the audio binary via downloadMetaMedia(mediaId), instead of
+// only logging the media ID. No AI/Gemini call is made — the downloaded
+// audio buffer is simply held ready for the future Phase 3-5 AI layer.
+// The customer-facing message and all existing detection logic above this
+// function are unchanged.
 async function handleIncomingAudio(phone, metaMessage) {
   try {
     const mediaId = metaMessage?.audio?.id || null;
@@ -575,12 +582,30 @@ async function handleIncomingAudio(phone, metaMessage) {
     }
 
     // Never log audio contents — only metadata needed for debugging.
+    console.log("🎙️ Audio message received");
+    console.log("🆔 Media ID:", mediaId);
     console.log("🎙️ Voice message received — mediaId:", mediaId, "from:", phone);
 
-    // Phase 1 stops here: media ID is captured and logged.
-    // Phase 2 will call downloadMetaMedia(mediaId) → understandVoiceOrder(...)
-    // → extractVoiceOrderDetails(...) → matchProductFromVoiceRequest(...)
-    // → sendVoiceOrderConfirmation(...), then reuse existing cart/order logic.
+    // ── PHASE 2: resolve the Meta media URL and download the audio ──
+    const audioResult = await downloadMetaMedia(mediaId);
+
+    if (!audioResult || !audioResult.success) {
+      console.error("❌ Voice message audio retrieval failed for mediaId:", mediaId);
+      await sendWhatsAppMessage(
+        phone,
+        `⚠️ We couldn't process that voice message. Please try again or type your order.`
+      );
+      return; // do not continue processing the voice order
+    }
+
+    console.log("✅ Audio downloaded successfully");
+
+    // Phase 1/2 stop here: the audio buffer (audioResult.audioBuffer) and
+    // its mimeType are captured and held in memory for this request only.
+    // Phase 3 will pass audioResult into understandVoiceOrder(...) →
+    // extractVoiceOrderDetails(...) → matchProductFromVoiceRequest(...)
+    // (Phase 6 connection point, already prepared below) →
+    // sendVoiceOrderConfirmation(...), then reuse existing cart/order logic.
 
     await sendWhatsAppMessage(
       phone,
@@ -597,11 +622,31 @@ async function handleIncomingAudio(phone, metaMessage) {
   }
 }
 
-// Downloads audio from Meta using the existing META_ACCESS_TOKEN.
-// Stubbed in Phase 1 — wired up and used starting Phase 2.
+// ─────────────────────────────────────────────────────────
+// PHASE 2 — Meta audio media retrieval + download.
+//
+// downloadMetaMedia(mediaId) does two Graph API steps required by Meta's
+// WhatsApp Cloud API for any inbound media (audio/image/document/etc):
+//   1. GET  /{media-id}                → returns a short-lived media URL
+//   2. GET  <that media URL>           → returns the actual binary bytes,
+//                                         and MUST be authenticated with
+//                                         the same Bearer access token.
+//
+// This reuses the existing META_ACCESS_TOKEN and META_MEDIA_BASE_URL
+// (already defined above for Phase 1) — no new env vars, no hard-coded
+// credentials, and no secret values are logged.
+//
+// Returns: { success: true, audioBuffer: Buffer, mimeType: string }
+//      or: { success: false, reason: "..." }
+// so callers (handleIncomingAudio, and eventually the Phase 3 AI layer)
+// can branch on success/failure without re-implementing Graph API calls.
+// ─────────────────────────────────────────────────────────
 async function downloadMetaMedia(mediaId) {
   try {
-    if (!mediaId) return null;
+    if (!mediaId) return { success: false, reason: "missing_media_id" };
+
+    // Step 1 — resolve the temporary media URL from the media ID.
+    console.log("🔍 Requesting Meta media information...");
 
     const metaRes = await fetch(`${META_MEDIA_BASE_URL}/${mediaId}`, {
       headers: { "Authorization": `Bearer ${META_ACCESS_TOKEN}` }
@@ -609,24 +654,47 @@ async function downloadMetaMedia(mediaId) {
 
     if (!metaRes.ok) {
       console.error("❌ downloadMetaMedia: failed to resolve media URL, status:", metaRes.status);
-      return null;
+      return { success: false, reason: "media_info_failed", status: metaRes.status };
     }
 
     const metaData = await metaRes.json().catch(() => ({}));
     const mediaUrl = metaData?.url || null;
+    const mimeType = metaData?.mime_type || "audio/ogg";
 
     if (!mediaUrl) {
       console.error("❌ downloadMetaMedia: no URL returned by Meta for mediaId:", mediaId);
-      return null;
+      return { success: false, reason: "no_media_url" };
     }
 
-    // Phase 2 will fetch the actual binary from mediaUrl using the same
-    // META_ACCESS_TOKEN and pass it to understandVoiceOrder(...).
-    return mediaUrl;
+    console.log("✅ Meta media URL received");
+
+    // Step 2 — download the actual audio bytes from the temporary URL.
+    // Same access token is required here too (Meta media URLs are not
+    // publicly fetchable without the Bearer token).
+    console.log("⬇️ Downloading audio...");
+
+    const downloadRes = await fetch(mediaUrl, {
+      headers: { "Authorization": `Bearer ${META_ACCESS_TOKEN}` }
+    });
+
+    if (!downloadRes.ok) {
+      console.error("❌ downloadMetaMedia: audio download failed, status:", downloadRes.status);
+      return { success: false, reason: "download_failed", status: downloadRes.status };
+    }
+
+    const arrayBuffer = await downloadRes.arrayBuffer();
+    const audioBuffer = Buffer.from(arrayBuffer);
+
+    // Do not log audio contents — size/mimeType only, for debugging.
+    console.log("✅ Audio downloaded successfully — size:", audioBuffer.length, "bytes, mimeType:", mimeType);
+
+    // Returned in a form ready to be handed to the future AI voice-processing
+    // module (Phase 3+). No AI call, no speech-to-text happens here.
+    return { success: true, audioBuffer, mimeType };
 
   } catch (err) {
     console.error("❌ downloadMetaMedia error:", err.message);
-    return null;
+    return { success: false, reason: "exception", error: err.message };
   }
 }
 
@@ -635,30 +703,143 @@ async function downloadMetaMedia(mediaId) {
 // { product_query, size, quantity }
 // AI is never the source of truth for price/stock/product ID.
 async function understandVoiceOrder(mediaUrl) {
-  console.log("ℹ️ understandVoiceOrder called — Phase 2 not yet implemented");
+  console.log("ℹ️ understandVoiceOrder called — Phase 3 not yet implemented");
   return null;
 }
 
 // Phase 2 placeholder — validates/normalizes the AI's structured output
 // before it's used to search the existing products table.
 function extractVoiceOrderDetails(aiResult) {
-  console.log("ℹ️ extractVoiceOrderDetails called — Phase 2 not yet implemented");
+  console.log("ℹ️ extractVoiceOrderDetails called — Phase 3 not yet implemented");
   return null;
 }
 
-// Phase 2 placeholder — matches the extracted product_query/size against
-// the EXISTING Supabase products table (same table/columns used by the
-// existing text-search flow). Must reuse existing product lookup patterns
-// rather than duplicating them.
+// ─────────────────────────────────────────────────────────
+// PHASE 6 — Connection point from the future AI voice-order result into
+// the EXISTING StyleFlow product/cart/checkout/order system.
+//
+// This function does NOT call any AI. It only accepts the structured
+// result AI will eventually produce:
+//   { product_query: string, size?: string, quantity?: number }
+//
+// It reuses the EXISTING products table and EXISTING search pattern
+// (same shape of query used by the text-search block in
+// processIncomingMessage — ilike across product_name/category/color/size)
+// so there is exactly one product lookup system, not a second one.
+//
+// It does NOT touch cart/orders itself — it only figures out which real
+// product (if any single one matches) the voice request refers to, and
+// returns a result describing what should happen next. The actual
+// cart/session update and order placement continue to be done by the
+// EXISTING functions (session updates, saveSelectedProduct, the "size"
+// checkout_step flow, placeOrder, etc.) once the customer confirms —
+// this function does not duplicate any of that.
+//
+// Returns one of:
+//   { status: "not_found" }
+//   { status: "clarification_needed", matches: [...] }
+//   { status: "size_unavailable", product, availableSizes }
+//   { status: "ready_for_confirmation", product, quantity }
+// ─────────────────────────────────────────────────────────
 async function matchProductFromVoiceRequest(storeId, voiceOrderDetails) {
-  console.log("ℹ️ matchProductFromVoiceRequest called — Phase 2 not yet implemented");
-  return null;
+  console.log("ℹ️ matchProductFromVoiceRequest called");
+
+  if (!storeId) {
+    console.error("❌ matchProductFromVoiceRequest: missing storeId");
+    return { status: "not_found" };
+  }
+
+  if (!voiceOrderDetails || !voiceOrderDetails.product_query || !voiceOrderDetails.product_query.trim()) {
+    console.error("❌ matchProductFromVoiceRequest: missing required field product_query");
+    return { status: "not_found" };
+  }
+
+  const productQuery = voiceOrderDetails.product_query.trim();
+  const requestedSize = voiceOrderDetails.size ? voiceOrderDetails.size.trim().toUpperCase() : null;
+  const quantity = Number.isFinite(voiceOrderDetails.quantity) && voiceOrderDetails.quantity > 0
+    ? Math.floor(voiceOrderDetails.quantity)
+    : 1;
+
+  // Reuses the EXISTING products table and the EXISTING search shape used
+  // by the text-search block (✅ 16. SEARCH) in processIncomingMessage —
+  // no second lookup system.
+  const { data: matches, error } = await supabase
+    .from("products")
+    .select("*")
+    .eq("store_id", storeId)
+    .or(`product_name.ilike.%${productQuery}%,category.ilike.%${productQuery}%,color.ilike.%${productQuery}%,size.ilike.%${productQuery}%`)
+    .order("id", { ascending: false });
+
+  if (error) {
+    console.error("❌ matchProductFromVoiceRequest: product search error:", error.message);
+    return { status: "not_found" };
+  }
+
+  if (!matches || matches.length === 0) {
+    return { status: "not_found" };
+  }
+
+  if (matches.length > 1) {
+    // Never guess between multiple matches — same principle as the
+    // existing multi-result text-search flow, which lists options and
+    // waits for the customer to pick a number instead of assuming.
+    return { status: "clarification_needed", matches };
+  }
+
+  const product = matches[0];
+
+  if (requestedSize && product.size) {
+    const availableSizes = product.size.split(',').map(s => s.trim().toUpperCase());
+    if (!availableSizes.includes(requestedSize)) {
+      return { status: "size_unavailable", product, availableSizes };
+    }
+  }
+
+  // Real product ID, price, and stock all come from the Supabase row above —
+  // AI never determines these values, it only supplied the search query.
+  return {
+    status: "ready_for_confirmation",
+    product,
+    quantity,
+    size: requestedSize || null
+  };
 }
 
-// Phase 2 placeholder — sends the order summary for customer confirmation
-// before handing off to the EXISTING placeOrder(...) / cart logic.
+// ─────────────────────────────────────────────────────────
+// PHASE 6 — Connection point that turns a matchProductFromVoiceRequest(...)
+// result into a customer-facing confirmation message, using the SAME
+// sendWhatsAppMessage/sendProductMessage helpers already used by the text
+// flow. This does NOT create a cart entry or an order — it only asks the
+// customer to confirm, exactly like the existing flow requires an explicit
+// ADD / CHECKOUT / PAID before anything is written to cart/orders.
+//
+// Once AI is implemented (Phase 3-5) and the customer confirms (future
+// phase), the EXISTING functions — saveSelectedProduct, the "size"
+// checkout_step handling, and placeOrder — are what will actually write to
+// cart/orders. This function is only the connection point / confirmation
+// message, not a parallel order system.
+// ─────────────────────────────────────────────────────────
 async function sendVoiceOrderConfirmation(phone, matchedProduct, quantity) {
-  console.log("ℹ️ sendVoiceOrderConfirmation called — Phase 2 not yet implemented");
+  console.log("ℹ️ sendVoiceOrderConfirmation called");
+
+  if (!matchedProduct) {
+    console.error("❌ sendVoiceOrderConfirmation: no matchedProduct provided");
+    return;
+  }
+
+  const qty = Number.isFinite(quantity) && quantity > 0 ? Math.floor(quantity) : 1;
+
+  const confirmationText =
+    `🎙️ *We heard your voice order!*\n\n` +
+    `📦 Product: ${matchedProduct.product_name}\n` +
+    `💰 Price: ₹${matchedProduct.price}\n` +
+    `📐 Sizes: ${matchedProduct.size || 'Free Size'}\n` +
+    `🔢 Quantity: ${qty}\n\n` +
+    `─────────────────\n` +
+    `This is a preview of what voice ordering will look like.\n` +
+    `Type *ADD* to add this to your cart, or search/type to continue as normal.`;
+
+  await sendWhatsAppMessage(phone, confirmationText);
 }
 
 async function saveSession(phone, data) {
@@ -895,7 +1076,7 @@ app.post("/webhook", async (req, res) => {
     } else if (metaMessage.type === "button") {
       msg = (metaMessage.button?.text || "").trim();
     } else if (metaMessage.type === "audio") {
-      // Voice ordering — Phase 1: detect + safely log media ID, reply, and stop.
+      // Voice ordering — Phase 1 detection + Phase 2 media retrieval/download.
       // Does not touch processIncomingMessage or any existing text-order path.
       await handleIncomingAudio(metaMessage.from, metaMessage);
       return;
