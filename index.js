@@ -2,6 +2,7 @@ const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 const messages = require("./helpers/messageTemplates");
 const { understandVoiceOrder } = require("./voiceAI");
+const { matchProductFromVoiceRequest } = require("./productMatcher");
 
 const app = express();
 
@@ -601,6 +602,10 @@ async function handleIncomingAudio(phone, metaMessage) {
     );
 
     console.log("📋 Voice AI result:", voiceResult);
+
+    const productResult = await matchProductFromVoiceRequest(voiceResult);
+
+    console.log("🔎 Product matching result:", productResult);
 
     if (!voiceResult || !voiceResult.understood) {
       await sendWhatsAppMessage(
