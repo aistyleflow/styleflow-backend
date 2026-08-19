@@ -750,69 +750,6 @@ function extractVoiceOrderDetails(aiResult) {
 //   { status: "size_unavailable", product, availableSizes }
 //   { status: "ready_for_confirmation", product, quantity }
 // ─────────────────────────────────────────────────────────
-async function matchProductFromVoiceRequest(storeId, voiceOrderDetails) {
-  console.log("ℹ️ matchProductFromVoiceRequest called");
-
-  if (!storeId) {
-    console.error("❌ matchProductFromVoiceRequest: missing storeId");
-    return { status: "not_found" };
-  }
-
-  if (!voiceOrderDetails || !voiceOrderDetails.product_query || !voiceOrderDetails.product_query.trim()) {
-    console.error("❌ matchProductFromVoiceRequest: missing required field product_query");
-    return { status: "not_found" };
-  }
-
-  const productQuery = voiceOrderDetails.product_query.trim();
-  const requestedSize = voiceOrderDetails.size ? voiceOrderDetails.size.trim().toUpperCase() : null;
-  const quantity = Number.isFinite(voiceOrderDetails.quantity) && voiceOrderDetails.quantity > 0
-    ? Math.floor(voiceOrderDetails.quantity)
-    : 1;
-
-  // Reuses the EXISTING products table and the EXISTING search shape used
-  // by the text-search block (✅ 16. SEARCH) in processIncomingMessage —
-  // no second lookup system.
-  const { data: matches, error } = await supabase
-    .from("products")
-    .select("*")
-    .eq("store_id", storeId)
-    .or(`product_name.ilike.%${productQuery}%,category.ilike.%${productQuery}%,color.ilike.%${productQuery}%,size.ilike.%${productQuery}%`)
-    .order("id", { ascending: false });
-
-  if (error) {
-    console.error("❌ matchProductFromVoiceRequest: product search error:", error.message);
-    return { status: "not_found" };
-  }
-
-  if (!matches || matches.length === 0) {
-    return { status: "not_found" };
-  }
-
-  if (matches.length > 1) {
-    // Never guess between multiple matches — same principle as the
-    // existing multi-result text-search flow, which lists options and
-    // waits for the customer to pick a number instead of assuming.
-    return { status: "clarification_needed", matches };
-  }
-
-  const product = matches[0];
-
-  if (requestedSize && product.size) {
-    const availableSizes = product.size.split(',').map(s => s.trim().toUpperCase());
-    if (!availableSizes.includes(requestedSize)) {
-      return { status: "size_unavailable", product, availableSizes };
-    }
-  }
-
-  // Real product ID, price, and stock all come from the Supabase row above —
-  // AI never determines these values, it only supplied the search query.
-  return {
-    status: "ready_for_confirmation",
-    product,
-    quantity,
-    size: requestedSize || null
-  };
-}
 
 // ─────────────────────────────────────────────────────────
 // PHASE 6 — Connection point that turns a matchProductFromVoiceRequest(...)
