@@ -603,7 +603,7 @@ async function handleIncomingAudio(phone, metaMessage) {
 
     console.log("📋 Voice AI result:", voiceResult);
 
-    const productResult = await matchProductFromVoiceRequest(voiceResult);
+    const productResult = await matchProductFromVoiceRequest(supabase,storeId,voiceResult);
 
     console.log("🔎 Product matching result:", productResult);
 
