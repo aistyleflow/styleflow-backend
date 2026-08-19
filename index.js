@@ -563,7 +563,7 @@ async function sendProductMessage(phone, product, storeId) {
 // Called from the webhook's message-type branch, parallel to
 // the existing text/interactive/button handling — does not
 // touch processIncomingMessage or any existing text-order logic.
-async function handleIncomingAudio(phone, metaMessage) {
+async function handleIncomingAudio(phone, metaMessage, storeId) {
   try {
     const mediaId = metaMessage?.audio?.id || null;
 
@@ -1022,9 +1022,35 @@ app.post("/webhook", async (req, res) => {
     } else if (metaMessage.type === "button") {
       msg = (metaMessage.button?.text || "").trim();
     } else if (metaMessage.type === "audio") {
-      // Voice ordering — Phase 1: detect + safely log media ID, reply, and stop.
-      // Does not touch processIncomingMessage or any existing text-order path.
-      await handleIncomingAudio(metaMessage.from, metaMessage);
+      // Voice ordering — resolve the same store used by the customer session,
+      // then pass it into the existing voice-order pipeline.
+
+      const { data: audioSession, error: audioSessionError } = await supabase
+        .from("user_sessions")
+        .select("store_id, pending_store_id")
+        .eq("phone_number", metaMessage.from)
+        .maybeSingle();
+
+      if (audioSessionError) {
+        console.error(
+          "❌ Could not resolve store for voice message:",
+          audioSessionError.message
+       );
+      }
+
+      const audioStoreId =
+        audioSession?.store_id ||
+        audioSession?.pending_store_id ||
+        null;
+
+      console.log("🏪 Voice message store ID:", audioStoreId);
+
+      await handleIncomingAudio(
+        metaMessage.from,
+        metaMessage,
+        audioStoreId
+      );
+
       return;
     } else {
       console.log("ℹ️ Unsupported message type received:", metaMessage.type);
