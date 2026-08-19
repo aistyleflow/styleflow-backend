@@ -562,13 +562,6 @@ async function sendProductMessage(phone, product, storeId) {
 // Called from the webhook's message-type branch, parallel to
 // the existing text/interactive/button handling — does not
 // touch processIncomingMessage or any existing text-order logic.
-//
-// PHASE 2 UPDATE: this now actually resolves the Meta media URL and
-// downloads the audio binary via downloadMetaMedia(mediaId), instead of
-// only logging the media ID. No AI/Gemini call is made — the downloaded
-// audio buffer is simply held ready for the future Phase 3-5 AI layer.
-// The customer-facing message and all existing detection logic above this
-// function are unchanged.
 async function handleIncomingAudio(phone, metaMessage) {
   try {
     const mediaId = metaMessage?.audio?.id || null;
@@ -610,8 +603,8 @@ async function handleIncomingAudio(phone, metaMessage) {
     console.log("📋 Voice AI result:", voiceResult);
 
     if (!voiceResult || !voiceResult.understood) {
-      await sendTextMessage(
-        from,
+      await sendWhatsAppMessage(
+        phone,
         "Sorry, I couldn't understand your voice message clearly. Please try again."
       );
       return;
@@ -621,8 +614,8 @@ async function handleIncomingAudio(phone, metaMessage) {
     const size = voiceResult.size || "Not specified";
     const quantity = voiceResult.quantity || "Not specified";
 
-    await sendTextMessage(
-      from,
+    await sendWhatsAppMessage(
+      phone,
       `🎙️ I understood your request:\n\n` +
       `Product: ${product}\n` +
       `Size: ${size}\n` +
@@ -631,14 +624,6 @@ async function handleIncomingAudio(phone, metaMessage) {
     );
 
     return;
-
-    // Phase 3 stops here.
-    // Do NOT create an order or modify the cart yet.
-    
-    await sendWhatsAppMessage(
-      phone,
-      `🎙️ Got your voice message! Voice ordering is coming soon.\n\nFor now, please type what you're looking for — for example: *Blue Jeans*.`
-    );
 
   } catch (err) {
     console.error("❌ handleIncomingAudio error:", err.message);
@@ -1095,7 +1080,7 @@ app.post("/webhook", async (req, res) => {
     } else if (metaMessage.type === "button") {
       msg = (metaMessage.button?.text || "").trim();
     } else if (metaMessage.type === "audio") {
-      // Voice ordering — Phase 1 detection + Phase 2 media retrieval/download.
+      // Voice ordering — Phase 1: detect + safely log media ID, reply, and stop.
       // Does not touch processIncomingMessage or any existing text-order path.
       await handleIncomingAudio(metaMessage.from, metaMessage);
       return;
