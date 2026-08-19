@@ -615,21 +615,63 @@ async function handleIncomingAudio(phone, metaMessage, storeId) {
       return;
     }
 
-    const product = voiceResult.product_query || "Not specified";
-    const size = voiceResult.size || "Not specified";
-    const quantity = voiceResult.quantity || "Not specified";
+    if (!productResult || productResult.status === "error") {
+  await sendWhatsAppMessage(
+    phone,
+    "⚠️ I couldn't check the store catalog right now. Please try again."
+  );
+  return;
+}
 
-    await sendWhatsAppMessage(
+if (productResult.status === "not_found") {
+  await sendWhatsAppMessage(
+    phone,
+    `❌ I couldn't find "${voiceResult.product_query}" in this store's catalog.\n\nPlease try another product.`
+  );
+  return;
+}
+
+if (productResult.status === "multiple_matches") {
+  let reply = `🔎 I found multiple products matching "${voiceResult.product_query}":\n\n`;
+
+  productResult.matches.forEach((product, index) => {
+    reply += `${index + 1}. *${product.product_name}*`;
+    if (product.color) reply += ` — ${product.color}`;
+    if (product.price) reply += ` — ₹${product.price}`;
+    reply += `\n`;
+  });
+
+  reply += `\nPlease reply with the product number you want.`;
+
+  await sendWhatsAppMessage(phone, reply);
+  return;
+}
+
+if (productResult.status === "matched") {
+  const product = productResult.product;
+  const requestedSize = productResult.size || "Free Size";
+  const quantity = productResult.quantity || 1;
+
+  const caption =
+    `🛍️ *${product.product_name}*\n\n` +
+    `💰 Price: ₹${product.price}\n` +
+    `📏 Size: ${requestedSize}\n` +
+    `🔢 Quantity: ${quantity}\n` +
+    `📦 Stock: ${product.stock}\n\n` +
+    `Reply *ADD* to add this product to your cart.`;
+
+  if (product.image_url) {
+    await sendWhatsAppImage(
       phone,
-      `🎙️ I understood your request:\n\n` +
-      `Product: ${product}\n` +
-      `Size: ${size}\n` +
-      `Quantity: ${quantity}\n\n` +
-      `Voice understanding is working!`
+      product.image_url,
+      caption
     );
+  } else {
+    await sendWhatsAppMessage(phone, caption);
+  }
 
-    return;
-
+  return;
+}
   } catch (err) {
     console.error("❌ handleIncomingAudio error:", err.message);
     try {
