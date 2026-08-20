@@ -510,6 +510,20 @@ async function sendWhatsAppImageMessage(to, imageUrl, caption) {
   return result.success;
 }
 
+// sendWhatsAppImage — thin wrapper matching the signature used by
+// handleIncomingAudio()'s matched-product branch: sendWhatsAppImage(phone, imageUrl, caption).
+// Reuses the existing sendWhatsAppImageMessage implementation (same Meta
+// Phone Number ID, access token, Graph API version, and metaGraphRequest
+// error handling already used elsewhere) — no duplicate config, no
+// duplicate Graph API call.
+async function sendWhatsAppImage(phone, imageUrl, caption = "") {
+  const sent = await sendWhatsAppImageMessage(phone, imageUrl, caption);
+  if (!sent) {
+    throw new Error(`sendWhatsAppImage: Meta rejected image message to ${toMetaPhone(phone)}`);
+  }
+  return sent;
+}
+
 async function sendProductMessage(phone, product, storeId) {
   console.log("📤 sendProductMessage — product:", product.product_name, "image:", product.image_url || "none");
 
@@ -661,11 +675,7 @@ if (productResult.status === "matched") {
     `Reply *ADD* to add this product to your cart.`;
 
   if (product.image_url) {
-    await sendWhatsAppImage(
-      phone,
-      product.image_url,
-      caption
-    );
+    await sendWhatsAppImage(phone, product.image_url, caption);
   } else {
     await sendWhatsAppMessage(phone, caption);
   }
