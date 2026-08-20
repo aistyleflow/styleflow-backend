@@ -666,6 +666,40 @@ if (productResult.status === "matched") {
   const requestedSize = productResult.size || "Free Size";
   const quantity = productResult.quantity || 1;
 
+  // ✅ Connect voice match → existing session/product-selection mechanism.
+  // 1) selected_product_id gets the REAL Supabase product ID.
+  await saveSelectedProduct(phone, product.id);
+
+  // 2) voice_pending_product carries the voice-requested size/quantity
+  //    so the existing ADD section can read it later. Size is preserved
+  //    as-is (null when not spoken) — no forced "Free Size" here.
+  try {
+    const voicePendingPayload = JSON.stringify({
+      product_id: product.id,
+      size: productResult.size || null,
+      quantity: productResult.quantity || 1
+    });
+
+    const { data: existingSession } = await supabase
+      .from("user_sessions")
+      .select("phone_number")
+      .eq("phone_number", phone)
+      .maybeSingle();
+
+    if (existingSession) {
+      await supabase
+        .from("user_sessions")
+        .update({ voice_pending_product: voicePendingPayload })
+        .eq("phone_number", phone);
+    } else {
+      await supabase
+        .from("user_sessions")
+        .insert({ phone_number: phone, voice_pending_product: voicePendingPayload });
+    }
+  } catch (sessionErr) {
+    console.error("❌ Failed to save voice_pending_product:", sessionErr.message);
+  }
+
   const caption =
     `🛍️ *${product.product_name}*\n\n` +
     `💰 Price: ₹${product.price}\n` +
