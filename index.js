@@ -1944,13 +1944,16 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         return sendTwiml(res, twiml);
       }
 
+      // ✅ Determine whether the pending voice data actually belongs to this product
+      const voicePendingMatches = !!(voicePending && voicePending.product_id === productIdToUse);
+
       // ✅ Determine quantity — voice pending uses its qty, normal text uses 1
-      const quantityToAdd = (voicePending && !session?.selected_product_id)
+      const quantityToAdd = voicePendingMatches
         ? (voicePending.quantity || 1)
         : 1;
 
       // ✅ Determine size — voice pending may already have a valid size
-      const voiceRequestedSize = (voicePending && !session?.selected_product_id)
+      const voiceRequestedSize = voicePendingMatches
         ? voicePending.size || null
         : null;
 
@@ -2009,7 +2012,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             }
           }
 
-          // ✅ Clear voice pending from session
+          // ✅ Clear voice pending from session (it was consumed here)
           await supabase.from("user_sessions")
             .update({ action_step: "product_action", voice_pending_product: null })
             .eq("phone_number", phone);
@@ -2071,7 +2074,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       await supabase.from("user_sessions")
         .update({
           action_step: "product_action",
-          voice_pending_product: voicePending && !session?.selected_product_id ? null : undefined
+          voice_pending_product: voicePendingMatches ? null : undefined
         })
         .eq("phone_number", phone);
 
