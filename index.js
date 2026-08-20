@@ -1801,7 +1801,10 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     }
 
     // ✅ 9. SIZE STEP
-    if (session?.checkout_step === "size") {
+    // ✅ Guard: if the customer typed the ADD command, this is NOT a size
+    // reply — let it fall through to the authoritative "// 11. ADD" handler
+    // below instead of being validated as an invalid size string.
+    if (session?.checkout_step === "size" && msgUpper !== "ADD") {
       const { data: product } = await supabase
         .from("products").select("*")
         .eq("id", session.selected_product_id).maybeSingle();
