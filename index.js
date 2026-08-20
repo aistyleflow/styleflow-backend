@@ -657,6 +657,47 @@ if (productResult.status === "multiple_matches") {
 
   reply += `\nPlease reply with the product number you want.`;
 
+  // ✅ Persist the pending voice multiple-match state so that the next
+  // numeric reply ("1", "2", ...) is interpreted as a product selection
+  // instead of falling into the size handler or the unrelated text-search
+  // "last_results" number handler. Reuses the existing voice_pending_product
+  // field — no new state variable.
+  try {
+    const voiceMultiMatchPayload = JSON.stringify({
+      status: "multiple_matches",
+      matches: productResult.matches.map(p => ({ id: p.id })),
+      size: voiceResult.size || null,
+      quantity: voiceResult.quantity || 1
+    });
+
+    const { data: existingSession, error: sessionFetchError } = await supabase
+      .from("user_sessions")
+      .select("phone_number")
+      .eq("phone_number", phone)
+      .maybeSingle();
+
+    if (sessionFetchError) {
+      console.error("❌ Failed to fetch session for voice multiple_matches state:", sessionFetchError.message);
+    } else if (existingSession) {
+      const { error: updateError } = await supabase
+        .from("user_sessions")
+        .update({ voice_pending_product: voiceMultiMatchPayload })
+        .eq("phone_number", phone);
+      if (updateError) {
+        console.error("❌ Failed to save voice multiple_matches state (update):", updateError.message);
+      }
+    } else {
+      const { error: insertError } = await supabase
+        .from("user_sessions")
+        .insert({ phone_number: phone, voice_pending_product: voiceMultiMatchPayload });
+      if (insertError) {
+        console.error("❌ Failed to save voice multiple_matches state (insert):", insertError.message);
+      }
+    }
+  } catch (stateErr) {
+    console.error("❌ Failed to save voice multiple_matches state:", stateErr.message);
+  }
+
   await sendWhatsAppMessage(phone, reply);
   return;
 }
@@ -1798,6 +1839,87 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       await incrementStoreMessageUsage(sessionStoreId, "outgoing");
       twiml.message(`⚠️ Please reply:\n\n*1* — Use Saved Address\n*2* — Add New Address`);
       return sendTwiml(res, twiml);
+    }
+
+    // ✅ 8b. VOICE MULTIPLE-MATCH PRODUCT SELECTION
+    // Must run BEFORE the SIZE STEP handler and BEFORE the normal text
+    // "NUMBER CHECK" handler, so a numeric reply to a voice multiple-match
+    // prompt is never misread as a size or as a text-search selection.
+    // Only activates when voice_pending_product actually holds a pending
+    // multiple_matches state — normal text flow (which uses last_results,
+    // not voice_pending_product) is completely unaffected.
+    {
+      const voiceMultiState = session?.voice_pending_product
+        ? (typeof session.voice_pending_product === 'string'
+            ? (() => { try { return JSON.parse(session.voice_pending_product); } catch (e) { return null; } })()
+            : session.voice_pending_product)
+        : null;
+
+      if (voiceMultiState && voiceMultiState.status === "multiple_matches" && /^[0-9]+$/.test(msg.trim())) {
+        const chosenIndex = parseInt(msg.trim(), 10) - 1;
+        const matches = Array.isArray(voiceMultiState.matches) ? voiceMultiState.matches : [];
+
+        if (chosenIndex < 0 || chosenIndex >= matches.length) {
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          twiml.message(`⚠️ Invalid selection. Choose between *1* and *${matches.length}*`);
+          return sendTwiml(res, twiml);
+        }
+
+        const chosenId = matches[chosenIndex]?.id;
+
+        const { data: chosenProduct } = await supabase
+          .from("products").select("*")
+          .eq("id", chosenId).maybeSingle();
+
+        if (!chosenProduct) {
+          await supabase.from("user_sessions")
+            .update({ voice_pending_product: null })
+            .eq("phone_number", phone);
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          twiml.message(`⚠️ Product not found. Please search again!`);
+          return sendTwiml(res, twiml);
+        }
+
+        // ✅ Reuse the existing selection mechanism — real product ID only.
+        await saveSelectedProduct(phone, chosenProduct.id);
+
+        // ✅ Collapse the multi-match state into the normal single-product
+        // voice_pending_product shape so the existing (already-fixed) ADD
+        // and SIZE STEP logic handles it exactly like a direct voice match.
+        const collapsedPayload = JSON.stringify({
+          product_id: chosenProduct.id,
+          size: voiceMultiState.size || null,
+          quantity: voiceMultiState.quantity || 1
+        });
+
+        const { error: collapseError } = await supabase
+          .from("user_sessions")
+          .update({ voice_pending_product: collapsedPayload, action_step: "product_action" })
+          .eq("phone_number", phone);
+
+        if (collapseError) {
+          console.error("❌ Failed to save selected voice product state:", collapseError.message);
+        }
+
+        const requestedSize = voiceMultiState.size || "Free Size";
+        const quantity = voiceMultiState.quantity || 1;
+
+        const caption =
+          `🛍️ *${chosenProduct.product_name}*\n\n` +
+          `💰 Price: ₹${chosenProduct.price}\n` +
+          `📏 Size: ${requestedSize}\n` +
+          `🔢 Quantity: ${quantity}\n` +
+          `📦 Stock: ${chosenProduct.stock}\n\n` +
+          `Reply *ADD* to add this product to your cart.`;
+
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        if (chosenProduct.image_url) {
+          await sendWhatsAppImage(phone, chosenProduct.image_url, caption);
+        } else {
+          await sendWhatsAppMessage(phone, caption);
+        }
+        return;
+      }
     }
 
     // ✅ 9. SIZE STEP
