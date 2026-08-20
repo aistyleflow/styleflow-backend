@@ -680,21 +680,29 @@ if (productResult.status === "matched") {
       quantity: productResult.quantity || 1
     });
 
-    const { data: existingSession } = await supabase
+    const { data: existingSession, error: sessionFetchError } = await supabase
       .from("user_sessions")
       .select("phone_number")
       .eq("phone_number", phone)
       .maybeSingle();
 
-    if (existingSession) {
-      await supabase
+    if (sessionFetchError) {
+      console.error("❌ Failed to fetch session for voice_pending_product:", sessionFetchError.message);
+    } else if (existingSession) {
+      const { error: updateError } = await supabase
         .from("user_sessions")
         .update({ voice_pending_product: voicePendingPayload })
         .eq("phone_number", phone);
+      if (updateError) {
+        console.error("❌ Failed to save voice_pending_product (update):", updateError.message);
+      }
     } else {
-      await supabase
+      const { error: insertError } = await supabase
         .from("user_sessions")
         .insert({ phone_number: phone, voice_pending_product: voicePendingPayload });
+      if (insertError) {
+        console.error("❌ Failed to save voice_pending_product (insert):", insertError.message);
+      }
     }
   } catch (sessionErr) {
     console.error("❌ Failed to save voice_pending_product:", sessionErr.message);
@@ -1818,6 +1826,18 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
       const finalSize = availableSizes.length > 0 ? enteredSize : msg.trim();
 
+      // ✅ Preserve voice-requested quantity (Case 2): if a still-pending
+      // voice order belongs to this product, use its quantity instead of
+      // defaulting to 1. Normal text ADD is unaffected (voicePendingForSize
+      // is null when there's no matching pending voice data).
+      const voicePendingForSize = session?.voice_pending_product
+        ? (typeof session.voice_pending_product === 'string'
+            ? JSON.parse(session.voice_pending_product)
+            : session.voice_pending_product)
+        : null;
+      const voiceQuantityMatches = !!(voicePendingForSize && voicePendingForSize.product_id === session.selected_product_id);
+      const quantityToUse = voiceQuantityMatches ? (voicePendingForSize.quantity || 1) : 1;
+
       const { data: existingCart } = await supabase
         .from("cart").select("*")
         .eq("phone_number", phone)
@@ -1827,7 +1847,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       if (existingCart) {
         const { error: updateError } = await supabase
           .from("cart")
-          .update({ quantity: existingCart.quantity + 1, size: finalSize })
+          .update({ quantity: existingCart.quantity + quantityToUse, size: finalSize })
           .eq("id", existingCart.id);
 
         if (updateError) {
@@ -1842,7 +1862,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
-          `🔢 Qty: ${existingCart.quantity + 1}\n\n` +
+          `🔢 Qty: ${existingCart.quantity + quantityToUse}\n\n` +
           `Type *CART* to View Cart\n` +
           `Type *CHECKOUT* to Checkout`
         );
@@ -1852,7 +1872,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           .insert({
             phone_number: phone,
             product_id: session.selected_product_id,
-            quantity: 1,
+            quantity: quantityToUse,
             size: finalSize
           });
 
@@ -1867,7 +1887,8 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           `✅ *Added to Cart!*\n\n` +
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
-          `💰 ₹${product.price}\n\n` +
+          `💰 ₹${product.price}\n` +
+          `🔢 Qty: ${quantityToUse}\n\n` +
           `Type *CART* to View Cart\n` +
           `Type *CHECKOUT* to Checkout`
         );
@@ -1875,7 +1896,11 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
       await supabase
         .from("user_sessions")
-        .update({ checkout_step: null, action_step: "product_action" })
+        .update({
+          checkout_step: null,
+          action_step: "product_action",
+          voice_pending_product: voiceQuantityMatches ? null : undefined
+        })
         .eq("phone_number", phone);
 
       return sendTwiml(res, twiml);
