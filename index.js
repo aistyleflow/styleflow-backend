@@ -1882,15 +1882,27 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
     // ✅ 11. ADD — top level
     if (msgUpper === "ADD") {
-      if (!session?.selected_product_id) {
+
+      // ✅ Check for voice-order pending product in session
+      const voicePending = session?.voice_pending_product
+        ? (typeof session.voice_pending_product === 'string'
+            ? JSON.parse(session.voice_pending_product)
+            : session.voice_pending_product)
+        : null;
+
+      // ✅ Determine which product ID to use — voice pending takes priority if no selected_product_id
+      const productIdToUse = session?.selected_product_id || voicePending?.product_id || null;
+
+      if (!productIdToUse) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
         twiml.message(`⚠️ Please select a product first by searching!`);
         return sendTwiml(res, twiml);
       }
 
+      // ✅ Always fetch fresh product from Supabase — truth source
       const { data: product } = await supabase
         .from("products").select("*")
-        .eq("id", session.selected_product_id).maybeSingle();
+        .eq("id", productIdToUse).maybeSingle();
 
       if (!product) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -1898,37 +1910,122 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         return sendTwiml(res, twiml);
       }
 
-      if (product.size && product.size.trim() !== '') {
-        await supabase
-          .from("user_sessions")
-          .update({ checkout_step: "size", action_step: null })
-          .eq("phone_number", phone);
+      // ✅ Determine quantity — voice pending uses its qty, normal text uses 1
+      const quantityToAdd = (voicePending && !session?.selected_product_id)
+        ? (voicePending.quantity || 1)
+        : 1;
 
-        await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-        twiml.message(
-          `📐 *Select Size*\n\n` +
-          `Product: *${product.product_name}*\n\n` +
-          `Available sizes:\n` +
-          product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
-          `\n\nType your size (e.g. *M* or *XL*)`
-        );
-        return sendTwiml(res, twiml);
+      // ✅ Determine size — voice pending may already have a valid size
+      const voiceRequestedSize = (voicePending && !session?.selected_product_id)
+        ? voicePending.size || null
+        : null;
+
+      const availableSizes = product.size
+        ? product.size.split(',').map(s => s.trim().toUpperCase())
+        : [];
+
+      // ✅ For voice order: if size is provided and valid, skip size-selection step
+      // For normal text order: keep existing size-selection behavior exactly
+      if (product.size && product.size.trim() !== '') {
+
+        if (voiceRequestedSize) {
+          // ✅ Voice order with size — validate the voice-requested size
+          const normalizedVoiceSize = voiceRequestedSize.toUpperCase();
+          const isSizeValid = availableSizes.length === 0 || availableSizes.includes(normalizedVoiceSize);
+
+          if (!isSizeValid) {
+            // ✅ Voice size not valid — ask customer to pick
+            await supabase
+              .from("user_sessions")
+              .update({ checkout_step: "size", action_step: null })
+              .eq("phone_number", phone);
+
+            await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
+            twiml.message(
+              `📐 *Select Size*\n\n` +
+              `Product: *${product.product_name}*\n\n` +
+              `Available sizes:\n` +
+              product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
+              `\n\nType your size (e.g. *M* or *XL*)`
+            );
+            return sendTwiml(res, twiml);
+          }
+
+          // ✅ Voice size is valid — add directly to cart with voice quantity and size
+          const finalSize = normalizedVoiceSize;
+
+          const { data: existingCart } = await supabase
+            .from("cart").select("*")
+            .eq("phone_number", phone)
+            .eq("product_id", productIdToUse)
+            .maybeSingle();
+
+          if (existingCart) {
+            await supabase.from("cart")
+              .update({ quantity: existingCart.quantity + quantityToAdd, size: finalSize })
+              .eq("id", existingCart.id);
+          } else {
+            const { error: insertError } = await supabase
+              .from("cart")
+              .insert({ phone_number: phone, product_id: productIdToUse, quantity: quantityToAdd, size: finalSize });
+            if (insertError) {
+              await incrementStoreMessageUsage(activeStoreId, "outgoing");
+              twiml.message(`⚠️ Cart error: ${insertError.message}`);
+              return sendTwiml(res, twiml);
+            }
+          }
+
+          // ✅ Clear voice pending from session
+          await supabase.from("user_sessions")
+            .update({ action_step: "product_action", voice_pending_product: null })
+            .eq("phone_number", phone);
+
+          await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
+          twiml.message(
+            `✅ *Added to Cart!*\n\n` +
+            `📦 ${product.product_name}\n` +
+            `📐 Size: *${finalSize}*\n` +
+            `💰 ₹${product.price}\n` +
+            `🔢 Qty: ${quantityToAdd}\n\n` +
+            `Type *CART* to View Cart\n` +
+            `Type *CHECKOUT* to Checkout`
+          );
+          return sendTwiml(res, twiml);
+
+        } else {
+          // ✅ Normal text order with sizes — existing behavior exactly unchanged
+          await supabase
+            .from("user_sessions")
+            .update({ checkout_step: "size", action_step: null })
+            .eq("phone_number", phone);
+
+          await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
+          twiml.message(
+            `📐 *Select Size*\n\n` +
+            `Product: *${product.product_name}*\n\n` +
+            `Available sizes:\n` +
+            product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
+            `\n\nType your size (e.g. *M* or *XL*)`
+          );
+          return sendTwiml(res, twiml);
+        }
       }
 
+      // ✅ No sizes on product — existing cart insert/update behavior exactly unchanged
       const { data: existingCart } = await supabase
         .from("cart").select("*")
         .eq("phone_number", phone)
-        .eq("product_id", session.selected_product_id)
+        .eq("product_id", productIdToUse)
         .maybeSingle();
 
       if (existingCart) {
         await supabase.from("cart")
-          .update({ quantity: existingCart.quantity + 1 })
+          .update({ quantity: existingCart.quantity + quantityToAdd })
           .eq("id", existingCart.id);
       } else {
         const { error: insertError } = await supabase
           .from("cart")
-          .insert({ phone_number: phone, product_id: session.selected_product_id, quantity: 1, size: 'Free Size' });
+          .insert({ phone_number: phone, product_id: productIdToUse, quantity: quantityToAdd, size: 'Free Size' });
         if (insertError) {
           await incrementStoreMessageUsage(activeStoreId, "outgoing");
           twiml.message(`⚠️ Cart error: ${insertError.message}`);
@@ -1936,12 +2033,20 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         }
       }
 
-      await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
+      // ✅ Clear voice pending from session if it was used
+      await supabase.from("user_sessions")
+        .update({
+          action_step: "product_action",
+          voice_pending_product: voicePending && !session?.selected_product_id ? null : undefined
+        })
+        .eq("phone_number", phone);
+
       await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
       twiml.message(
         `✅ *Added to Cart!*\n\n` +
         `📦 ${product.product_name}\n` +
-        `💰 ₹${product.price}\n\n` +
+        `💰 ₹${product.price}\n` +
+        `🔢 Qty: ${quantityToAdd}\n\n` +
         `Type *CART* to View Cart\n` +
         `Type *CHECKOUT* to Checkout`
       );
