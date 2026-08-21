@@ -1927,10 +1927,16 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     }
 
     // ✅ 9. SIZE STEP
-    // ✅ Guard: if the customer typed the ADD command, this is NOT a size
-    // reply — let it fall through to the authoritative "// 11. ADD" handler
-    // below instead of being validated as an invalid size string.
-    if (session?.checkout_step === "size" && msgUpper !== "ADD") {
+    // ✅ Guard: control commands (ADD, CART, CHECKOUT) are NOT size replies —
+    // let them fall through to their authoritative handlers below instead of
+    // being validated as an invalid size string. (No CANCEL command exists
+    // in this app, so it's not included here.)
+    const isControlCommand =
+      msgUpper === "ADD" ||
+      msgUpper === "CART" ||
+      msgUpper === "CHECKOUT";
+
+    if (session?.checkout_step === "size" && !isControlCommand) {
       const { data: product } = await supabase
         .from("products").select("*")
         .eq("id", session.selected_product_id).maybeSingle();
@@ -2167,9 +2173,12 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             }
           }
 
-          // ✅ Clear voice pending from session (it was consumed here)
+          // ✅ Clear voice pending from session (it was consumed here).
+          // Also clear any stale checkout_step="size" left over from an
+          // earlier interaction, so the next CHECKOUT reaches its handler
+          // instead of being swallowed by the SIZE STEP guard.
           await supabase.from("user_sessions")
-            .update({ action_step: "product_action", last_results: null })
+            .update({ checkout_step: null, action_step: "product_action", last_results: null })
             .eq("phone_number", phone);
 
           await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
@@ -2225,9 +2234,12 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         }
       }
 
-      // ✅ Clear voice pending from session if it was used
+      // ✅ Clear voice pending from session if it was used. Also clear any
+      // stale checkout_step="size" left from an earlier interaction so a
+      // later CHECKOUT isn't swallowed by the SIZE STEP guard.
       await supabase.from("user_sessions")
         .update({
+          checkout_step: null,
           action_step: "product_action",
           last_results: voicePendingMatches ? null : undefined
         })
