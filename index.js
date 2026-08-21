@@ -524,6 +524,92 @@ async function sendWhatsAppImage(phone, imageUrl, caption = "") {
   return sent;
 }
 
+// ─────────────────────────────────────────────────────────
+// WHATSAPP INTERACTIVE MESSAGE HELPERS
+// Reuse the existing metaGraphRequest() and toMetaPhone() —
+// same Phone Number ID, same access token, same error handling.
+// No second Meta API client, no duplicate auth logic.
+// ─────────────────────────────────────────────────────────
+
+// buttons: array of { id, title } — max 3 per Meta's limit for reply buttons.
+async function sendWhatsAppButtons(to, bodyText, buttons, options = {}) {
+  if (!Array.isArray(buttons) || buttons.length === 0) {
+    console.error("❌ sendWhatsAppButtons: no buttons provided");
+    return { success: false, error: "no buttons provided" };
+  }
+  if (buttons.length > 3) {
+    console.error("❌ sendWhatsAppButtons: Meta allows max 3 reply buttons, got", buttons.length);
+    return { success: false, error: "too many buttons" };
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: toMetaPhone(to),
+    type: "interactive",
+    interactive: {
+      type: "button",
+      ...(options.header ? { header: { type: "text", text: options.header } } : {}),
+      body: { text: bodyText },
+      ...(options.footer ? { footer: { text: options.footer } } : {}),
+      action: {
+        buttons: buttons.map(b => ({
+          type: "reply",
+          reply: { id: String(b.id), title: String(b.title).slice(0, 20) }
+        }))
+      }
+    }
+  };
+
+  console.log("📤 Outgoing Meta interactive-button request → to:", toMetaPhone(to), "ids:", buttons.map(b => b.id).join(","));
+  const result = await metaGraphRequest(payload);
+  return result.success;
+}
+
+// sections: array of { title, rows: [{ id, title, description? }] }
+// Meta list limits: up to 10 total rows across all sections.
+async function sendWhatsAppList(to, bodyText, buttonText, sections, options = {}) {
+  if (!Array.isArray(sections) || sections.length === 0) {
+    console.error("❌ sendWhatsAppList: no sections provided");
+    return { success: false, error: "no sections provided" };
+  }
+  const totalRows = sections.reduce((sum, s) => sum + (s.rows?.length || 0), 0);
+  if (totalRows === 0) {
+    console.error("❌ sendWhatsAppList: no rows provided");
+    return { success: false, error: "no rows provided" };
+  }
+  if (totalRows > 10) {
+    console.error("❌ sendWhatsAppList: Meta allows max 10 total rows, got", totalRows);
+    return { success: false, error: "too many rows" };
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: toMetaPhone(to),
+    type: "interactive",
+    interactive: {
+      type: "list",
+      ...(options.header ? { header: { type: "text", text: options.header } } : {}),
+      body: { text: bodyText },
+      ...(options.footer ? { footer: { text: options.footer } } : {}),
+      action: {
+        button: buttonText,
+        sections: sections.map(s => ({
+          title: s.title,
+          rows: s.rows.map(r => ({
+            id: String(r.id),
+            title: String(r.title).slice(0, 24),
+            ...(r.description ? { description: String(r.description).slice(0, 72) } : {})
+          }))
+        }))
+      }
+    }
+  };
+
+  console.log("📤 Outgoing Meta interactive-list request → to:", toMetaPhone(to), "rows:", totalRows);
+  const result = await metaGraphRequest(payload);
+  return result.success;
+}
+
 async function sendProductMessage(phone, product, storeId) {
   console.log("📤 sendProductMessage — product:", product.product_name, "image:", product.image_url || "none");
 
@@ -533,34 +619,64 @@ async function sendProductMessage(phone, product, storeId) {
     `💰 Price: ₹${product.price}\n` +
     `📦 Stock: ${product.stock}\n` +
     `📐 Sizes: ${product.size || 'Free Size'}\n` +
-    `🎨 Color: ${product.color}\n\n` +
-    `─────────────────\n` +
+    `🎨 Color: ${product.color}`;
+
+  const textFallbackBody =
+    bodyText + `\n\n─────────────────\n` +
     `Type *ADD* to 🛒 Add to Cart\n` +
     `Type *CART* to 👀 View Cart\n` +
     `Type *CHECKOUT* to ✅ Checkout\n` +
     `🔍 Or search more products`;
 
+  const productButtons = [
+    { id: "ADD_PRODUCT", title: "🛒 Add to Cart" },
+    { id: "VIEW_CART", title: "👀 View Cart" },
+    { id: "CHECKOUT", title: "✅ Checkout" }
+  ];
+
   try {
+    // Meta image messages don't support the interactive button structure,
+    // so image + caption is sent first, then buttons as a separate message.
+    let imageSent = false;
     if (product.image_url && product.image_url.trim() !== '') {
       const accessible = await isImageAccessible(product.image_url);
       if (accessible) {
         console.log("📷 Sending product with image via Meta Cloud API");
-        const sent = await sendWhatsAppImageMessage(phone, product.image_url, bodyText);
-        if (sent) {
-          if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-          return;
-        }
-        console.log("⚠️ Image send failed — falling back to text only");
+        imageSent = await sendWhatsAppImageMessage(phone, product.image_url, bodyText);
+        if (!imageSent) console.log("⚠️ Image send failed — continuing with text/buttons");
       } else {
         console.log("⚠️ Image not accessible — sending text only");
       }
     }
-    console.log("📝 Sending product text-only via Meta Cloud API");
-    await sendWhatsAppMessage(phone, bodyText);
+
+    if (imageSent) {
+      if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+      const buttonsSent = await sendWhatsAppButtons(phone, `What would you like to do next?`, productButtons);
+      if (buttonsSent) {
+        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+      } else {
+        console.log("⚠️ Interactive buttons failed after image — falling back to text instructions");
+        await sendWhatsAppMessage(phone, `Type *ADD* to 🛒 Add to Cart\nType *CART* to 👀 View Cart\nType *CHECKOUT* to ✅ Checkout`);
+        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+      }
+      return;
+    }
+
+    // No image (or image failed) — try interactive buttons with the body text.
+    const buttonsSent = await sendWhatsAppButtons(phone, bodyText, productButtons);
+    if (buttonsSent) {
+      if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+      return;
+    }
+
+    // Final fallback — plain text with typed instructions. Customer must
+    // never be left without a response.
+    console.log("📝 Sending product text-only via Meta Cloud API (interactive fallback)");
+    await sendWhatsAppMessage(phone, textFallbackBody);
     if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
   } catch (err) {
     console.error("❌ sendProductMessage error:", err.message);
-    await sendWhatsAppMessage(phone, bodyText);
+    await sendWhatsAppMessage(phone, textFallbackBody);
     if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
   }
 }
@@ -646,21 +762,10 @@ if (productResult.status === "not_found") {
 }
 
 if (productResult.status === "multiple_matches") {
-  let reply = `🔎 I found multiple products matching "${voiceResult.product_query}":\n\n`;
-
-  productResult.matches.forEach((product, index) => {
-    reply += `${index + 1}. *${product.product_name}*`;
-    if (product.color) reply += ` — ${product.color}`;
-    if (product.price) reply += ` — ₹${product.price}`;
-    reply += `\n`;
-  });
-
-  reply += `\nPlease reply with the product number you want.`;
-
   // ✅ Persist the pending voice multiple-match state using only EXISTING
   // columns: last_results (JSONB, reused as an object instead of the plain
   // array normal text search stores) + action_step as the discriminator
-  // checked before other handlers. Uses only existing columns.
+  // checked before other handlers.
   try {
     const voiceMultiMatchPayload = {
       voice_pending: true,
@@ -698,7 +803,36 @@ if (productResult.status === "multiple_matches") {
     console.error("❌ Failed to save voice multiple_matches state:", stateErr.message);
   }
 
-  await sendWhatsAppMessage(phone, reply);
+  // ✅ Interactive list as primary UI. Row IDs are VOICE_PRODUCT_<id> so the
+  // "8b. VOICE MULTIPLE-MATCH PRODUCT SELECTION" handler (which validates
+  // store isolation) resolves them deterministically. Numeric reply ("1",
+  // "2", ...) remains a working fallback via the same handler.
+  const rows = productResult.matches.slice(0, 10).map(product => ({
+    id: `VOICE_PRODUCT_${product.id}`,
+    title: product.product_name.slice(0, 24),
+    description: [product.color, product.price ? `₹${product.price}` : null].filter(Boolean).join(' · ').slice(0, 72)
+  }));
+
+  const listSent = await sendWhatsAppList(
+    phone,
+    `🔎 I found multiple products matching "${voiceResult.product_query}". Select one:`,
+    "View Products",
+    [{ title: "Matching Products", rows }]
+  );
+
+  if (!listSent) {
+    // Fallback: plain numbered text (legacy behavior), still resolvable by
+    // the same handler via its numeric-reply path.
+    let reply = `🔎 I found multiple products matching "${voiceResult.product_query}":\n\n`;
+    productResult.matches.forEach((product, index) => {
+      reply += `${index + 1}. *${product.product_name}*`;
+      if (product.color) reply += ` — ${product.color}`;
+      if (product.price) reply += ` — ₹${product.price}`;
+      reply += `\n`;
+    });
+    reply += `\nPlease reply with the product number you want.`;
+    await sendWhatsAppMessage(phone, reply);
+  }
   return;
 }
 
@@ -987,11 +1121,34 @@ function createReplyQueue(phone, storeIdRef) {
   const queue = [];
   return {
     message(text) {
-      queue.push(text);
+      queue.push({ kind: "text", text });
+    },
+    // ✅ Queue an interactive buttons message alongside plain text replies,
+    // through the same flush pipeline. buttons: [{id, title}], max 3.
+    buttons(bodyText, buttons, options = {}) {
+      queue.push({ kind: "buttons", bodyText, buttons, options });
+    },
+    // ✅ Queue an interactive list message. sections: [{title, rows:[{id,title,description?}]}]
+    list(bodyText, buttonText, sections, options = {}) {
+      queue.push({ kind: "list", bodyText, buttonText, sections, options });
     },
     async flush() {
-      for (const text of queue) {
-        await sendWhatsAppMessage(phone, text);
+      for (const item of queue) {
+        if (item.kind === "text") {
+          await sendWhatsAppMessage(phone, item.text);
+        } else if (item.kind === "buttons") {
+          const sent = await sendWhatsAppButtons(phone, item.bodyText, item.buttons, item.options);
+          if (!sent) {
+            console.log("⚠️ Interactive buttons failed in reply queue — falling back to text");
+            await sendWhatsAppMessage(phone, item.bodyText);
+          }
+        } else if (item.kind === "list") {
+          const sent = await sendWhatsAppList(phone, item.bodyText, item.buttonText, item.sections, item.options);
+          if (!sent) {
+            console.log("⚠️ Interactive list failed in reply queue — falling back to text");
+            await sendWhatsAppMessage(phone, item.bodyText);
+          }
+        }
       }
     }
   };
@@ -1043,6 +1200,24 @@ function buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, coupo
   return msg;
 }
 
+// ✅ Derives the interactive button set using the exact same enabled/
+// disabled/minimum-COD logic as buildPaymentOptionsMessage above (same
+// inputs, same conditions) — never exposes a disabled payment method as
+// selectable. Returns null when no methods are available (existing error
+// text from buildPaymentOptionsMessage is used in that case instead).
+function buildPaymentButtons(paymentSettings, orderTotal) {
+  const codEnabled = paymentSettings?.cod_enabled !== false;
+  const upiEnabled = paymentSettings?.upi_enabled !== false;
+  const minCod = paymentSettings?.minimum_cod_amount || 0;
+  const codBlocked = minCod > 0 && orderTotal < minCod;
+
+  const buttons = [];
+  if (codEnabled && !codBlocked) buttons.push({ id: "PAY_COD", title: "💵 Cash on Delivery" });
+  if (upiEnabled) buttons.push({ id: "PAY_UPI", title: "📱 UPI" });
+
+  return buttons.length > 0 ? buttons : null;
+}
+
 async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, shopName, twiml) {
   const result = await validateCoupon(couponCode, storeId, orderTotal);
   console.log("🎟️ Coupon validation result:", JSON.stringify(result));
@@ -1060,6 +1235,10 @@ async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, sho
 
     await incrementStoreMessageUsage(storeId, "outgoing");
     twiml.message(errorMsg);
+    await incrementStoreMessageUsage(storeId, "outgoing");
+    twiml.buttons(`Or skip and continue to payment.`, [
+      { id: "SKIP_COUPON", title: "⏭️ Skip Coupon" }
+    ]);
     return { applied: false };
   }
 
@@ -1091,6 +1270,11 @@ async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, sho
     `─────────────────\n` +
     buildPaymentOptionsMessage(paymentSettings, discountedTotal, shopName, true)
   );
+  const paymentButtons = buildPaymentButtons(paymentSettings, discountedTotal);
+  if (paymentButtons) {
+    await incrementStoreMessageUsage(storeId, "outgoing");
+    twiml.buttons(`Select your payment method:`, paymentButtons);
+  }
   return { applied: true, discountedTotal, discountAmount };
 }
 
@@ -1153,9 +1337,9 @@ app.post("/webhook", async (req, res) => {
     } else if (metaMessage.type === "interactive") {
       const interactive = metaMessage.interactive;
       if (interactive?.button_reply) {
-        msg = interactive.button_reply.title || interactive.button_reply.id || "";
+        msg = interactive.button_reply.id || interactive.button_reply.title || "";
       } else if (interactive?.list_reply) {
-        msg = interactive.list_reply.title || interactive.list_reply.id || "";
+        msg = interactive.list_reply.id || interactive.list_reply.title || "";
       }
       msg = msg.trim();
     } else if (metaMessage.type === "button") {
@@ -1398,7 +1582,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       const orderTotal = session.pending_order_total || 0;
       const shopName = await getShopName(storeId);
 
-      if (msgUpper === "SKIP" || msgUpper === "NO" || msgLower === "skip" || msgLower === "no") {
+      if (msgUpper === "SKIP" || msgUpper === "NO" || msgLower === "skip" || msgLower === "no" || msgUpper === "SKIP_COUPON") {
         await supabase
           .from("user_sessions")
           .update({
@@ -1411,6 +1595,11 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         const paymentSettings = await getPaymentSettings(storeId);
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, false));
+        const paymentButtons = buildPaymentButtons(paymentSettings, orderTotal);
+        if (paymentButtons) {
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.buttons(`Select your payment method:`, paymentButtons);
+        }
         return sendTwiml(res, twiml);
       }
 
@@ -1430,7 +1619,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       const upiEnabled = paymentSettings?.upi_enabled !== false;
       const minCod = paymentSettings?.minimum_cod_amount || 0;
 
-      if (msg === "1" || msgUpper === "COD" || msgUpper === "CASH ON DELIVERY") {
+      if (msg === "1" || msgUpper === "COD" || msgUpper === "CASH ON DELIVERY" || msgUpper === "PAY_COD") {
         if (!codEnabled) {
           await incrementStoreMessageUsage(storeId, "outgoing");
           twiml.message(`⚠️ Cash on Delivery is not available.\n\nPlease type *2* to pay with UPI.`);
@@ -1445,7 +1634,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         return;
       }
 
-      if (msg === "2" || msgUpper === "UPI" || msgUpper === "PAY WITH UPI") {
+      if (msg === "2" || msgUpper === "UPI" || msgUpper === "PAY WITH UPI" || msgUpper === "PAY_UPI") {
         if (!upiEnabled) {
           await incrementStoreMessageUsage(storeId, "outgoing");
           twiml.message(`⚠️ UPI payment is not available.\n\nPlease type *1* to use Cash on Delivery.`);
@@ -1529,6 +1718,11 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `⚠️ Invalid selection.\n\n` +
         buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, !!session.applied_coupon_code)
       );
+      const invalidPaymentButtons = buildPaymentButtons(paymentSettings, orderTotal);
+      if (invalidPaymentButtons) {
+        await incrementStoreMessageUsage(storeId, "outgoing");
+        twiml.buttons(`Select your payment method:`, invalidPaymentButtons);
+      }
       return sendTwiml(res, twiml);
     }
 
@@ -1771,7 +1965,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
     // ✅ 8. CHECKOUT STEP — SAVED ADDRESS CHOICE
     if (session?.checkout_step === "saved_address_choice") {
-      if (msg === "1" || msgUpper === "USE SAVED ADDRESS") {
+      if (msg === "1" || msgUpper === "USE SAVED ADDRESS" || msgUpper === "USE_SAVED_ADDRESS") {
         const savedAddress = session.saved_address_data
           ? JSON.parse(session.saved_address_data)
           : null;
@@ -1824,13 +2018,16 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           `🎟️ *Apply Coupon Code?*\n\n` +
           `🧾 Cart Total: *₹${orderTotal}*\n\n` +
           `If you have a coupon, type it now.\n` +
-          `Example: *SAVE20*\n\n` +
-          `Or type *SKIP* to continue without a coupon.`
+          `Example: *SAVE20*`
         );
+        await incrementStoreMessageUsage(storeId, "outgoing");
+        twiml.buttons(`Or skip and continue to payment.`, [
+          { id: "SKIP_COUPON", title: "⏭️ Skip Coupon" }
+        ]);
         return sendTwiml(res, twiml);
       }
 
-      if (msg === "2" || msgUpper === "ADD NEW ADDRESS" || msgUpper === "NEW ADDRESS") {
+      if (msg === "2" || msgUpper === "ADD NEW ADDRESS" || msgUpper === "NEW ADDRESS" || msgUpper === "ADD_NEW_ADDRESS") {
         await supabase.from("user_sessions").update({ checkout_step: "name_phone" }).eq("phone_number", phone);
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.message(
@@ -1840,8 +2037,16 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         return sendTwiml(res, twiml);
       }
 
-      await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-      twiml.message(`⚠️ Please reply:\n\n*1* — Use Saved Address\n*2* — Add New Address`);
+      const sent = await sendWhatsAppButtons(phone, `⚠️ Please choose an option:`, [
+        { id: "USE_SAVED_ADDRESS", title: "📍 Use Saved" },
+        { id: "ADD_NEW_ADDRESS", title: "🏠 New Address" }
+      ]);
+      if (sent) {
+        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+      } else {
+        twiml.message(`⚠️ Please reply:\n\n*1* — Use Saved Address\n*2* — Add New Address`);
+        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+      }
       return sendTwiml(res, twiml);
     }
 
@@ -1851,27 +2056,44 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     // prompt is never misread as a size or as a text-search selection.
     // Uses only EXISTING columns: action_step as the discriminator, and
     // last_results (JSONB) reused as an object instead of the plain array
-    // normal text search stores there. Uses only existing columns.
-    if (session?.action_step === "voice_multi_pending" && /^[0-9]+$/.test(msg.trim())) {
+    // normal text search stores there.
+    // Accepts either the interactive list ID (VOICE_PRODUCT_<id>) or the
+    // legacy numeric reply ("1", "2", ...) as fallback.
+    const isVoiceProductId = msgUpper.startsWith("VOICE_PRODUCT_");
+    const isNumericReply = /^[0-9]+$/.test(msg.trim());
+
+    if (session?.action_step === "voice_multi_pending" && (isVoiceProductId || isNumericReply)) {
       const voiceMultiState = session?.last_results && !Array.isArray(session.last_results)
         ? session.last_results
         : null;
 
-      const chosenIndex = parseInt(msg.trim(), 10) - 1;
       const matches = voiceMultiState && Array.isArray(voiceMultiState.matches) ? voiceMultiState.matches : [];
 
-      if (!voiceMultiState || chosenIndex < 0 || chosenIndex >= matches.length) {
+      // ✅ Resolve the chosen product ID from either input form.
+      let chosenId = null;
+      if (isVoiceProductId) {
+        chosenId = msgUpper.slice("VOICE_PRODUCT_".length);
+      } else {
+        const chosenIndex = parseInt(msg.trim(), 10) - 1;
+        if (voiceMultiState && chosenIndex >= 0 && chosenIndex < matches.length) {
+          chosenId = matches[chosenIndex]?.id;
+        }
+      }
+
+      if (!voiceMultiState || !chosenId) {
         await supabase.from("user_sessions").update({ action_step: null, last_results: null }).eq("phone_number", phone);
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
         twiml.message(matches.length ? `⚠️ Invalid selection. Choose between *1* and *${matches.length}*` : `⚠️ Session expired. Please search again!`);
         return sendTwiml(res, twiml);
       }
 
-      const chosenId = matches[chosenIndex]?.id;
-
+      // ✅ Store isolation: validate the chosen product actually belongs to
+      // the current active store before trusting the client-supplied ID.
       const { data: chosenProduct } = await supabase
         .from("products").select("*")
-        .eq("id", chosenId).maybeSingle();
+        .eq("id", chosenId)
+        .eq("store_id", activeStoreId)
+        .maybeSingle();
 
       if (!chosenProduct) {
         await supabase.from("user_sessions")
@@ -1914,26 +2136,45 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `💰 Price: ₹${chosenProduct.price}\n` +
         `📏 Size: ${requestedSize}\n` +
         `🔢 Quantity: ${quantity}\n` +
-        `📦 Stock: ${chosenProduct.stock}\n\n` +
-        `Reply *ADD* to add this product to your cart.`;
+        `📦 Stock: ${chosenProduct.stock}`;
 
-      await incrementStoreMessageUsage(activeStoreId, "outgoing");
       if (chosenProduct.image_url) {
-        await sendWhatsAppImage(phone, chosenProduct.image_url, caption);
+        const accessible = await isImageAccessible(chosenProduct.image_url);
+        if (accessible) {
+          await sendWhatsAppImageMessage(phone, chosenProduct.image_url, caption);
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          const buttonsSent = await sendWhatsAppButtons(phone, `Ready to add this to your cart?`, [
+            { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
+          ]);
+          if (buttonsSent) {
+            await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          } else {
+            await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
+            await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          }
+          return;
+        }
+      }
+
+      const buttonsSent = await sendWhatsAppButtons(phone, caption, [
+        { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
+      ]);
+      if (buttonsSent) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
       } else {
-        await sendWhatsAppMessage(phone, caption);
+        await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
       }
       return;
     }
 
     // ✅ 9. SIZE STEP
-    // ✅ Guard: control commands (ADD, CART, CHECKOUT) are NOT size replies —
-    // let them fall through to their authoritative handlers below instead of
-    // being validated as an invalid size string. (No CANCEL command exists
-    // in this app, so it's not included here.)
+    // ✅ Guard: control commands (text or interactive ID form) are NOT size
+    // replies — let them fall through to their authoritative handlers below
+    // instead of being validated as an invalid size string.
     const isControlCommand =
-      msgUpper === "ADD" ||
-      msgUpper === "CART" ||
+      msgUpper === "ADD" || msgUpper === "ADD_PRODUCT" ||
+      msgUpper === "CART" || msgUpper === "VIEW_CART" ||
       msgUpper === "CHECKOUT";
 
     if (session?.checkout_step === "size" && !isControlCommand) {
@@ -1951,11 +2192,24 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       const availableSizes = product.size
         ? product.size.split(',').map(s => s.trim().toUpperCase())
         : [];
-      const enteredSize = msg.trim().toUpperCase();
+
+      // ✅ Accept both typed size text ("M") and interactive list/button IDs
+      // (e.g. "SIZE_M") — normalize either into the plain size token.
+      const rawInput = msg.trim().toUpperCase();
+      const enteredSize = rawInput.startsWith("SIZE_") ? rawInput.slice(5) : rawInput;
 
       if (availableSizes.length > 0 && !availableSizes.includes(enteredSize)) {
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.message(`⚠️ *"${msg}"* is not a valid size.\n\nPlease choose from: *${product.size}*`);
+        const sizeRows = availableSizes.map(s => ({ id: `SIZE_${s}`, title: s }));
+        if (availableSizes.length > 3) {
+          twiml.list(
+            `⚠️ *"${msg}"* is not a valid size.\n\nPlease choose from the list:`,
+            "Choose Size",
+            [{ title: "Available Sizes", rows: sizeRows }]
+          );
+        } else {
+          twiml.buttons(`⚠️ *"${msg}"* is not a valid size.\n\nPlease choose from: *${product.size}*`, sizeRows);
+        }
         return sendTwiml(res, twiml);
       }
 
@@ -1996,10 +2250,14 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
-          `🔢 Qty: ${existingCart.quantity + quantityToUse}\n\n` +
-          `Type *CART* to View Cart\n` +
-          `Type *CHECKOUT* to Checkout`
+          `🔢 Qty: ${existingCart.quantity + quantityToUse}`
         );
+        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+        twiml.buttons(`What would you like to do next?`, [
+          { id: "VIEW_CART", title: "👀 View Cart" },
+          { id: "CHECKOUT", title: "✅ Checkout" },
+          { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
+        ]);
       } else {
         const { error: insertError } = await supabase
           .from("cart")
@@ -2022,10 +2280,14 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
-          `🔢 Qty: ${quantityToUse}\n\n` +
-          `Type *CART* to View Cart\n` +
-          `Type *CHECKOUT* to Checkout`
+          `🔢 Qty: ${quantityToUse}`
         );
+        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
+        twiml.buttons(`What would you like to do next?`, [
+          { id: "VIEW_CART", title: "👀 View Cart" },
+          { id: "CHECKOUT", title: "✅ Checkout" },
+          { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
+        ]);
       }
 
       await supabase
@@ -2074,7 +2336,8 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     }
 
     // ✅ 11. ADD — top level
-    if (msgUpper === "ADD") {
+    // ✅ Accept both the typed text command and its interactive button ID.
+    if (msgUpper === "ADD" || msgUpper === "ADD_PRODUCT") {
 
       // ✅ Check for voice-order pending product in session (action_step
       // discriminator + last_results reused as an object).
@@ -2139,13 +2402,13 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
               .eq("phone_number", phone);
 
             await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-            twiml.message(
-              `📐 *Select Size*\n\n` +
-              `Product: *${product.product_name}*\n\n` +
-              `Available sizes:\n` +
-              product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
-              `\n\nType your size (e.g. *M* or *XL*)`
-            );
+            const sizeRows = availableSizes.map(s => ({ id: `SIZE_${s}`, title: s }));
+            const sizeBody = `📐 *Select Size*\n\nProduct: *${product.product_name}*\n\nThe size we heard ("${voiceRequestedSize}") isn't available for this product.`;
+            if (availableSizes.length > 3) {
+              twiml.list(sizeBody, "Choose Size", [{ title: "Available Sizes", rows: sizeRows }]);
+            } else {
+              twiml.buttons(sizeBody, sizeRows);
+            }
             return sendTwiml(res, twiml);
           }
 
@@ -2187,27 +2450,32 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             `📦 ${product.product_name}\n` +
             `📐 Size: *${finalSize}*\n` +
             `💰 ₹${product.price}\n` +
-            `🔢 Qty: ${quantityToAdd}\n\n` +
-            `Type *CART* to View Cart\n` +
-            `Type *CHECKOUT* to Checkout`
+            `🔢 Qty: ${quantityToAdd}`
           );
+          await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
+          twiml.buttons(`What would you like to do next?`, [
+            { id: "VIEW_CART", title: "👀 View Cart" },
+            { id: "CHECKOUT", title: "✅ Checkout" },
+            { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
+          ]);
           return sendTwiml(res, twiml);
 
         } else {
-          // ✅ Normal text order with sizes — existing behavior exactly unchanged
+          // ✅ Normal text order with sizes — existing behavior, now also
+          // offered as an interactive size selector.
           await supabase
             .from("user_sessions")
             .update({ checkout_step: "size", action_step: null })
             .eq("phone_number", phone);
 
           await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-          twiml.message(
-            `📐 *Select Size*\n\n` +
-            `Product: *${product.product_name}*\n\n` +
-            `Available sizes:\n` +
-            product.size.split(',').map(s => `• *${s.trim()}*`).join('\n') +
-            `\n\nType your size (e.g. *M* or *XL*)`
-          );
+          const sizeRows = availableSizes.map(s => ({ id: `SIZE_${s}`, title: s }));
+          const sizeBody = `📐 *Select Size*\n\nProduct: *${product.product_name}*`;
+          if (availableSizes.length > 3) {
+            twiml.list(sizeBody, "Choose Size", [{ title: "Available Sizes", rows: sizeRows }]);
+          } else {
+            twiml.buttons(sizeBody, sizeRows);
+          }
           return sendTwiml(res, twiml);
         }
       }
@@ -2250,21 +2518,33 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `✅ *Added to Cart!*\n\n` +
         `📦 ${product.product_name}\n` +
         `💰 ₹${product.price}\n` +
-        `🔢 Qty: ${quantityToAdd}\n\n` +
-        `Type *CART* to View Cart\n` +
-        `Type *CHECKOUT* to Checkout`
+        `🔢 Qty: ${quantityToAdd}`
       );
+      await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
+      twiml.buttons(`What would you like to do next?`, [
+        { id: "VIEW_CART", title: "👀 View Cart" },
+        { id: "CHECKOUT", title: "✅ Checkout" },
+        { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
+      ]);
       return sendTwiml(res, twiml);
     }
 
     // ✅ 12. CART — top level
-    if (msgUpper === "CART") {
+    // ✅ Accept both the typed command and its interactive button ID.
+    if (msgUpper === "CART" || msgUpper === "VIEW_CART") {
       const { data: cartItems } = await supabase
         .from("cart").select("*").eq("phone_number", phone);
 
       if (!cartItems || cartItems.length === 0) {
-        await incrementStoreMessageUsage(activeStoreId, "outgoing");
-        twiml.message(`🛒 Your cart is empty.\n\nSearch for products and type *ADD* to add them!`);
+        const sent = await sendWhatsAppButtons(phone, `🛒 Your cart is empty.\n\nSearch for products to get started!`, [
+          { id: "CONTINUE_SHOPPING", title: "🔍 Start Shopping" }
+        ]);
+        if (sent) {
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        } else {
+          twiml.message(`🛒 Your cart is empty.\n\nSearch for products and type *ADD* to add them!`);
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        }
         return sendTwiml(res, twiml);
       }
 
@@ -2290,12 +2570,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       reply += `─────────────────\n`;
       reply += `🧾 *Total: ₹${total}*\n`;
       reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart\n\n`;
-      reply += `Type *CHECKOUT* to place your order\n`;
-      reply += `🎟️ Have a coupon? Type *COUPON YOURCODE*\n`;
-      reply += `🔍 Or search for more products!`;
+      reply += `🎟️ Have a coupon? Type *COUPON YOURCODE*`;
 
       await incrementStoreMessageUsage(activeStoreId, "outgoing");
       twiml.message(reply);
+      await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      twiml.buttons(`Ready to checkout?`, [
+        { id: "CHECKOUT", title: "✅ Checkout" },
+        { id: "CONTINUE_SHOPPING", title: "🔍 Continue Shopping" }
+      ]);
       return sendTwiml(res, twiml);
     }
 
@@ -2305,8 +2588,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         .from("cart").select("*").eq("phone_number", phone);
 
       if (!cartCheck || cartCheck.length === 0) {
-        await incrementStoreMessageUsage(activeStoreId, "outgoing");
-        twiml.message(`⚠️ Your cart is empty!\n\nSearch for products and type *ADD* to add them first.`);
+        const sent = await sendWhatsAppButtons(phone, `⚠️ Your cart is empty!\n\nSearch for products to get started.`, [
+          { id: "CONTINUE_SHOPPING", title: "🔍 Start Shopping" }
+        ]);
+        if (sent) {
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        } else {
+          twiml.message(`⚠️ Your cart is empty!\n\nSearch for products and type *ADD* to add them first.`);
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        }
         return sendTwiml(res, twiml);
       }
 
@@ -2330,16 +2620,24 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           })
           .eq("phone_number", phone);
 
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(
+        const addrBody =
           `📍 *Saved Delivery Address*\n\n` +
           `👤 ${savedAddress.customer_name}\n` +
-          `🏠 ${savedAddress.address}\n\n` +
-          `Reply:\n` +
-          `*1* — Use Saved Address\n` +
-          `*2* — Add New Address`
-        );
-        return sendTwiml(res, twiml);
+          `🏠 ${savedAddress.address}`;
+        const sent = await sendWhatsAppButtons(phone, addrBody, [
+          { id: "USE_SAVED_ADDRESS", title: "📍 Use Saved" },
+          { id: "ADD_NEW_ADDRESS", title: "🏠 New Address" }
+        ]);
+        if (sent) {
+          await incrementStoreMessageUsage(storeId, "outgoing");
+        } else {
+          twiml.message(
+            addrBody + `\n\nReply:\n*1* — Use Saved Address\n*2* — Add New Address`
+          );
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          return sendTwiml(res, twiml);
+        }
+        return;
       }
 
       await supabase
@@ -2479,6 +2777,36 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       }
     }
 
+    // ✅ 15a. INTERACTIVE PRODUCT SELECTION (from search-results list)
+    // Mirrors the existing NUMBER CHECK validation: re-fetch from Supabase
+    // and verify store isolation. Numeric selection (below) remains a
+    // working fallback since last_results is unchanged by this addition.
+    if (msgUpper.startsWith("PRODUCT_")) {
+      const selectedProductId = msgUpper.slice("PRODUCT_".length);
+
+      const { data: freshProduct } = await supabase
+        .from("products")
+        .select("*")
+        .eq("id", selectedProductId)
+        .eq("store_id", sessionStoreId)
+        .maybeSingle();
+
+      if (!freshProduct) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Product not found. Please search again!`);
+        return sendTwiml(res, twiml);
+      }
+
+      await saveSelectedProduct(phone, freshProduct.id);
+      await supabase
+        .from("user_sessions")
+        .update({ action_step: "product_action", last_results: null })
+        .eq("phone_number", phone);
+
+      await sendProductMessage(phone, freshProduct, freshProduct.store_id || activeStoreId);
+      return;
+    }
+
     // ✅ 15. NUMBER CHECK
     const isNumber = /^[0-9]+$/.test(msg);
 
@@ -2539,6 +2867,17 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       return;
     }
 
+    // ✅ 15b. CONTINUE SHOPPING (interactive navigation)
+    if (msgUpper === "CONTINUE_SHOPPING" || msgUpper === "CONTINUE SHOPPING") {
+      await supabase
+        .from("user_sessions")
+        .update({ action_step: "product_action", checkout_step: null })
+        .eq("phone_number", phone);
+      await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      twiml.message(`🔍 What are you looking for?\n\nJust type a product name, category, or color to search.`);
+      return sendTwiml(res, twiml);
+    }
+
     // ✅ 16. SEARCH
     console.log(`🔍 Searching: "${msg}" — store_id: ${sessionStoreId || 'none'}`);
 
@@ -2569,17 +2908,21 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       } else {
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
 
-        let response = `🛍️ *Products matching "${msg}"*:\n\n`;
-        data.forEach((product, index) => {
-          response += `${index + 1}. *${product.product_name}*\n`;
-          response += `   💰 ₹${product.price}\n`;
-          response += `   📐 Sizes: ${product.size || 'Free Size'}\n`;
-          response += `   🎨 Color: ${product.color}\n`;
-          response += product.image_url ? `   🖼️ Image available\n\n` : `\n`;
-        });
-        response += `_Reply with a number to select!_`;
+        // ✅ Interactive list as primary UI; numeric reply remains a working
+        // fallback via the existing "// ✅ 15. NUMBER CHECK" handler, since
+        // last_results (the array) is unchanged by this.
+        const rows = data.slice(0, 10).map(product => ({
+          id: `PRODUCT_${product.id}`,
+          title: product.product_name.slice(0, 24),
+          description: `₹${product.price} · ${product.size || 'Free Size'} · ${product.color || ''}`.slice(0, 72)
+        }));
+
         await incrementStoreMessageUsage(sessionStoreId || activeStoreId, "outgoing");
-        twiml.message(response);
+        twiml.list(
+          `🛍️ *Products matching "${msg}"*\n\nSelect one from the list, or reply with a number.`,
+          "View Products",
+          [{ title: "Search Results", rows }]
+        );
       }
     } else {
       await incrementStoreMessageUsage(activeStoreId, "outgoing");
