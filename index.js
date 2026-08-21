@@ -1184,20 +1184,19 @@ function buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, coupo
     if (codBlocked) {
       msg += `💵 Cash on Delivery — Minimum order ₹${minCod} required\n\n`;
     } else {
-      msg += `💵 *1* — Cash on Delivery (COD)\n\n`;
+      msg += `💵 Cash on Delivery (COD)\n\n`;
     }
   }
 
   if (upiEnabled) {
-    msg += `📱 *2* — Pay with UPI\n\n`;
+    msg += `📱 Pay with UPI\n\n`;
   }
 
   if (instructions) {
     msg += `ℹ️ ${instructions}\n\n`;
   }
 
-  msg += `_Reply with *1* for COD or *2* for UPI_`;
-  return msg;
+  return msg.trim();
 }
 
 // ✅ Derives the interactive button set using the exact same enabled/
@@ -2244,16 +2243,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
 
-        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.message(
+        const cartUpdatedBody =
           `✅ *Cart Updated!*\n\n` +
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
-          `🔢 Qty: ${existingCart.quantity + quantityToUse}`
-        );
+          `🔢 Qty: ${existingCart.quantity + quantityToUse}\n\n` +
+          `What would you like to do next?`;
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.buttons(`What would you like to do next?`, [
+        twiml.buttons(cartUpdatedBody, [
           { id: "VIEW_CART", title: "👀 View Cart" },
           { id: "CHECKOUT", title: "✅ Checkout" },
           { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
@@ -2274,16 +2272,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
 
-        await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.message(
+        const addedToCartBody =
           `✅ *Added to Cart!*\n\n` +
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
-          `🔢 Qty: ${quantityToUse}`
-        );
+          `🔢 Qty: ${quantityToUse}\n\n` +
+          `What would you like to do next?`;
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
-        twiml.buttons(`What would you like to do next?`, [
+        twiml.buttons(addedToCartBody, [
           { id: "VIEW_CART", title: "👀 View Cart" },
           { id: "CHECKOUT", title: "✅ Checkout" },
           { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
@@ -2444,16 +2441,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             .update({ checkout_step: null, action_step: "product_action", last_results: null })
             .eq("phone_number", phone);
 
-          await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-          twiml.message(
+          const voiceAddedBody =
             `✅ *Added to Cart!*\n\n` +
             `📦 ${product.product_name}\n` +
             `📐 Size: *${finalSize}*\n` +
             `💰 ₹${product.price}\n` +
-            `🔢 Qty: ${quantityToAdd}`
-          );
+            `🔢 Qty: ${quantityToAdd}\n\n` +
+            `What would you like to do next?`;
           await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-          twiml.buttons(`What would you like to do next?`, [
+          twiml.buttons(voiceAddedBody, [
             { id: "VIEW_CART", title: "👀 View Cart" },
             { id: "CHECKOUT", title: "✅ Checkout" },
             { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
@@ -2513,15 +2509,14 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         })
         .eq("phone_number", phone);
 
-      await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-      twiml.message(
+      const freeSizeAddedBody =
         `✅ *Added to Cart!*\n\n` +
         `📦 ${product.product_name}\n` +
         `💰 ₹${product.price}\n` +
-        `🔢 Qty: ${quantityToAdd}`
-      );
+        `🔢 Qty: ${quantityToAdd}\n\n` +
+        `What would you like to do next?`;
       await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-      twiml.buttons(`What would you like to do next?`, [
+      twiml.buttons(freeSizeAddedBody, [
         { id: "VIEW_CART", title: "👀 View Cart" },
         { id: "CHECKOUT", title: "✅ Checkout" },
         { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
@@ -2708,14 +2703,17 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         }
 
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
-        await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
-        twiml.message(
+        const actionStepAddedBody =
           `✅ *Added to Cart!*\n\n` +
           `📦 ${product.product_name}\n` +
           `💰 ₹${product.price}\n\n` +
-          `Type *CART* to View Cart\n` +
-          `Type *CHECKOUT* to Checkout`
-        );
+          `What would you like to do next?`;
+        await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
+        twiml.buttons(actionStepAddedBody, [
+          { id: "VIEW_CART", title: "👀 View Cart" },
+          { id: "CHECKOUT", title: "✅ Checkout" },
+          { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
+        ]);
         return sendTwiml(res, twiml);
       }
 
