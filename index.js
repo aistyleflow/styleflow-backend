@@ -610,10 +610,20 @@ async function sendWhatsAppList(to, bodyText, buttonText, sections, options = {}
   return result.success;
 }
 
+// ─────────────────────────────────────────────────────────
+// sendProductMessage — Project 1 fix: product details and the
+// [🛒 Add to Cart] button are now ONE attached interactive message.
+// The customer never has to type ADD when this button exists.
+// Image (if accessible) is sent first as its own message — Meta does not
+// allow image + interactive buttons in a single payload — immediately
+// followed by ONE interactive-button message whose body IS the product
+// details. This replaces the old "Reply ADD..." text-only pattern and the
+// old two-message (details, then separate "what next" buttons) pattern.
+// ─────────────────────────────────────────────────────────
 async function sendProductMessage(phone, product, storeId) {
   console.log("📤 sendProductMessage — product:", product.product_name, "image:", product.image_url || "none");
 
-  const bodyText =
+  const detailsText =
     `🛍️ *Product Details*\n\n` +
     `📦 Product: ${product.product_name}\n` +
     `💰 Price: ₹${product.price}\n` +
@@ -622,55 +632,35 @@ async function sendProductMessage(phone, product, storeId) {
     `🎨 Color: ${product.color}`;
 
   const textFallbackBody =
-    bodyText + `\n\n─────────────────\n` +
+    detailsText + `\n\n─────────────────\n` +
     `Type *ADD* to 🛒 Add to Cart\n` +
     `Type *CART* to 👀 View Cart\n` +
-    `Type *CHECKOUT* to ✅ Checkout\n` +
-    `🔍 Or search more products`;
+    `Type *CHECKOUT* to ✅ Checkout`;
 
-  const productButtons = [
-    { id: "ADD_PRODUCT", title: "🛒 Add to Cart" },
-    { id: "VIEW_CART", title: "👀 View Cart" },
-    { id: "CHECKOUT", title: "✅ Checkout" }
+  const addToCartButtons = [
+    { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
   ];
 
   try {
-    // Meta image messages don't support the interactive button structure,
-    // so image + caption is sent first, then buttons as a separate message.
-    let imageSent = false;
     if (product.image_url && product.image_url.trim() !== '') {
       const accessible = await isImageAccessible(product.image_url);
       if (accessible) {
-        console.log("📷 Sending product with image via Meta Cloud API");
-        imageSent = await sendWhatsAppImageMessage(phone, product.image_url, bodyText);
-        if (!imageSent) console.log("⚠️ Image send failed — continuing with text/buttons");
+        console.log("📷 Sending product image via Meta Cloud API");
+        const imageSent = await sendWhatsAppImageMessage(phone, product.image_url, product.product_name);
+        if (imageSent && storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+        if (!imageSent) console.log("⚠️ Image send failed — continuing with details + button");
       } else {
-        console.log("⚠️ Image not accessible — sending text only");
+        console.log("⚠️ Image not accessible — sending details + button only");
       }
     }
 
-    if (imageSent) {
-      if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-      const buttonsSent = await sendWhatsAppButtons(phone, `What would you like to do next?`, productButtons);
-      if (buttonsSent) {
-        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-      } else {
-        console.log("⚠️ Interactive buttons failed after image — falling back to text instructions");
-        await sendWhatsAppMessage(phone, `Type *ADD* to 🛒 Add to Cart\nType *CART* to 👀 View Cart\nType *CHECKOUT* to ✅ Checkout`);
-        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-      }
-      return;
-    }
-
-    // No image (or image failed) — try interactive buttons with the body text.
-    const buttonsSent = await sendWhatsAppButtons(phone, bodyText, productButtons);
+    // Product details + Add to Cart button as ONE attached interactive message.
+    const buttonsSent = await sendWhatsAppButtons(phone, detailsText, addToCartButtons);
     if (buttonsSent) {
       if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
       return;
     }
 
-    // Final fallback — plain text with typed instructions. Customer must
-    // never be left without a response.
     console.log("📝 Sending product text-only via Meta Cloud API (interactive fallback)");
     await sendWhatsAppMessage(phone, textFallbackBody);
     if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
@@ -892,13 +882,34 @@ if (productResult.status === "matched") {
     `💰 Price: ₹${product.price}\n` +
     `📏 Size: ${requestedSize}\n` +
     `🔢 Quantity: ${quantity}\n` +
-    `📦 Stock: ${product.stock}\n\n` +
-    `Reply *ADD* to add this product to your cart.`;
+    `📦 Stock: ${product.stock}`;
 
+  // Voice single-match: product details + Add to Cart button attached as
+  // ONE interactive message — same pattern as sendProductMessage. Voice
+  // quantity/size stay preserved in session (already saved above via
+  // last_results/action_step="voice_single_pending") and are picked up by
+  // the ADD handler untouched — this change only affects presentation.
   if (product.image_url) {
-    await sendWhatsAppImage(phone, product.image_url, caption);
-  } else {
-    await sendWhatsAppMessage(phone, caption);
+    const accessible = await isImageAccessible(product.image_url);
+    if (accessible) {
+      const imgSent = await sendWhatsAppImageMessage(phone, product.image_url, product.product_name);
+      if (imgSent) {
+        const btnSent = await sendWhatsAppButtons(phone, caption, [
+          { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
+        ]);
+        if (!btnSent) {
+          await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
+        }
+        return;
+      }
+    }
+  }
+
+  const btnSent = await sendWhatsAppButtons(phone, caption, [
+    { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
+  ]);
+  if (!btnSent) {
+    await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
   }
 
   return;
@@ -1230,12 +1241,11 @@ async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, sho
     } else if (result.reason === "min_order") {
       errorMsg = `🛍️ *Minimum order required.*\n\nThis coupon requires a minimum order of ₹${result.minOrder}.\nYour cart total is ₹${orderTotal}.\n\n`;
     }
-    errorMsg += `Type your coupon code to try again, or type *SKIP* to continue without a coupon.`;
+    errorMsg += `Type another coupon code to try again, or skip.`;
 
+    // Project 1: error text + Skip button attached as ONE message.
     await incrementStoreMessageUsage(storeId, "outgoing");
-    twiml.message(errorMsg);
-    await incrementStoreMessageUsage(storeId, "outgoing");
-    twiml.buttons(`Or skip and continue to payment.`, [
+    twiml.buttons(errorMsg, [
       { id: "SKIP_COUPON", title: "⏭️ Skip Coupon" }
     ]);
     return { applied: false };
@@ -1259,20 +1269,23 @@ async function applyCouponAndRespond(phone, couponCode, storeId, orderTotal, sho
     .eq("phone_number", phone);
 
   const paymentSettings = await getPaymentSettings(storeId);
+  const paymentButtons = buildPaymentButtons(paymentSettings, discountedTotal);
 
-  await incrementStoreMessageUsage(storeId, "outgoing");
-  twiml.message(
+  const successMsg =
     `🎉 *Coupon Applied!*\n\n` +
     `🎟️ Code: *${couponCode}*\n` +
     `💸 Discount: ${discountLabel} = *−₹${discountAmount}*\n` +
     `💰 New Total: *₹${discountedTotal}*\n\n` +
     `─────────────────\n` +
-    buildPaymentOptionsMessage(paymentSettings, discountedTotal, shopName, true)
-  );
-  const paymentButtons = buildPaymentButtons(paymentSettings, discountedTotal);
+    buildPaymentOptionsMessage(paymentSettings, discountedTotal, shopName, true);
+
+  // Project 1: coupon success + payment method text + payment buttons
+  // attached as ONE message.
+  await incrementStoreMessageUsage(storeId, "outgoing");
   if (paymentButtons) {
-    await incrementStoreMessageUsage(storeId, "outgoing");
-    twiml.buttons(`Select your payment method:`, paymentButtons);
+    twiml.buttons(successMsg, paymentButtons);
+  } else {
+    twiml.message(successMsg);
   }
   return { applied: true, discountedTotal, discountAmount };
 }
@@ -1592,12 +1605,13 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           .eq("phone_number", phone);
 
         const paymentSettings = await getPaymentSettings(storeId);
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, false));
         const paymentButtons = buildPaymentButtons(paymentSettings, orderTotal);
+        const paymentMsg = buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, false);
+        await incrementStoreMessageUsage(storeId, "outgoing");
         if (paymentButtons) {
-          await incrementStoreMessageUsage(storeId, "outgoing");
-          twiml.buttons(`Select your payment method:`, paymentButtons);
+          twiml.buttons(paymentMsg, paymentButtons);
+        } else {
+          twiml.message(paymentMsg);
         }
         return sendTwiml(res, twiml);
       }
@@ -1650,7 +1664,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
 
-        await supabase
+         await supabase
           .from("user_sessions")
           .update({ checkout_step: "awaiting_payment", payment_method: "UPI" })
           .eq("phone_number", phone);
@@ -1668,7 +1682,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           `📲 UPI ID: *${upiId}*\n\n`;
 
         if (instructions) upiMsg += `ℹ️ ${instructions}\n\n`;
-        upiMsg += `─────────────────\nAfter paying, type *PAID* to confirm ✅\nOr type *CANCEL* to cancel this order.`;
+        upiMsg += `─────────────────\nAfter paying, type *PAID* to confirm ✅`;
 
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(upiMsg);
@@ -1680,22 +1694,24 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             const qrSent = await sendWhatsAppImageMessage(
               phone,
               qrCodeUrl,
-              `📷 *Scan to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`
+              `Scan to pay ₹${orderTotal} — then type PAID to confirm.`
             );
             if (qrSent) {
               await incrementStoreMessageUsage(storeId, "outgoing");
             } else {
               console.error("❌ QR send failed via Meta API");
-              await sendWhatsAppMessage(phone, `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
+              await sendWhatsAppMessage(phone, `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*, then type *PAID* to confirm.`);
               await incrementStoreMessageUsage(storeId, "outgoing");
             }
           } else {
-            await sendWhatsAppMessage(phone, `⚠️ QR code could not be loaded.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
+            await sendWhatsAppMessage(phone, `⚠️ QR code could not be loaded.\n\nPlease pay to UPI ID: *${upiId}*, then type *PAID* to confirm.`);
             await incrementStoreMessageUsage(storeId, "outgoing");
           }
         }
 
         return;
+
+
       }
 
       if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
@@ -1712,15 +1728,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         return sendTwiml(res, twiml);
       }
 
-      await incrementStoreMessageUsage(storeId, "outgoing");
-      twiml.message(
-        `⚠️ Invalid selection.\n\n` +
-        buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, !!session.applied_coupon_code)
-      );
       const invalidPaymentButtons = buildPaymentButtons(paymentSettings, orderTotal);
+      const invalidMsg =
+        `⚠️ Invalid selection.\n\n` +
+        buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, !!session.applied_coupon_code);
+      await incrementStoreMessageUsage(storeId, "outgoing");
       if (invalidPaymentButtons) {
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.buttons(`Select your payment method:`, invalidPaymentButtons);
+        twiml.buttons(invalidMsg, invalidPaymentButtons);
+      } else {
+        twiml.message(invalidMsg);
       }
       return sendTwiml(res, twiml);
     }
@@ -1742,8 +1758,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           `⏳ *Waiting for your payment*\n\n` +
           `Please complete payment of *₹${orderTotal}*\n` +
           `to UPI ID: *${upiId}*\n\n` +
-          `After paying, type *PAID* to confirm.\n` +
-          `Or type *CANCEL* to cancel this order.`
+          `After paying, type *PAID* to confirm.`
         );
         return sendTwiml(res, twiml);
       }
@@ -1949,15 +1964,16 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
       console.log(`✅ Address saved — step moved to: ${nextStep}`);
 
+      // Project 1: coupon prompt + Skip button attached as ONE message.
       await incrementStoreMessageUsage(storeId, "outgoing");
-      twiml.message(
+      twiml.buttons(
         `✅ *Address saved!*\n\n` +
         `─────────────────\n` +
         `🎟️ *Apply Coupon Code?*\n\n` +
         `🧾 Cart Total: *₹${orderTotal}*\n\n` +
         `If you have a coupon, type it now.\n` +
-        `Example: *SAVE20*\n\n` +
-        `Or type *SKIP* to continue without a coupon.`
+        `Example: *SAVE20*`,
+        [{ id: "SKIP_COUPON", title: "⏭️ Skip Coupon" }]
       );
       return sendTwiml(res, twiml);
     }
@@ -2011,18 +2027,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           .eq("phone_number", phone);
 
         await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(
+        twiml.buttons(
           `✅ *Address confirmed!*\n\n` +
           `─────────────────\n` +
           `🎟️ *Apply Coupon Code?*\n\n` +
           `🧾 Cart Total: *₹${orderTotal}*\n\n` +
           `If you have a coupon, type it now.\n` +
-          `Example: *SAVE20*`
+          `Example: *SAVE20*`,
+          [{ id: "SKIP_COUPON", title: "⏭️ Skip Coupon" }]
         );
-        await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.buttons(`Or skip and continue to payment.`, [
-          { id: "SKIP_COUPON", title: "⏭️ Skip Coupon" }
-        ]);
         return sendTwiml(res, twiml);
       }
 
@@ -2140,15 +2153,15 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       if (chosenProduct.image_url) {
         const accessible = await isImageAccessible(chosenProduct.image_url);
         if (accessible) {
-          await sendWhatsAppImageMessage(phone, chosenProduct.image_url, caption);
-          await incrementStoreMessageUsage(activeStoreId, "outgoing");
-          const buttonsSent = await sendWhatsAppButtons(phone, `Ready to add this to your cart?`, [
+          const imgSent = await sendWhatsAppImageMessage(phone, chosenProduct.image_url, chosenProduct.product_name);
+          if (imgSent) await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          const buttonsSent = await sendWhatsAppButtons(phone, caption, [
             { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
           ]);
           if (buttonsSent) {
             await incrementStoreMessageUsage(activeStoreId, "outgoing");
           } else {
-            await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
+            await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
             await incrementStoreMessageUsage(activeStoreId, "outgoing");
           }
           return;
@@ -2243,17 +2256,16 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
 
+        // Project 1: text + action buttons attached as ONE interactive message.
         const cartUpdatedBody =
           `✅ *Cart Updated!*\n\n` +
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
-          `🔢 Qty: ${existingCart.quantity + quantityToUse}\n\n` +
-          `What would you like to do next?`;
+          `🔢 Qty: ${existingCart.quantity + quantityToUse}`;
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.buttons(cartUpdatedBody, [
           { id: "VIEW_CART", title: "👀 View Cart" },
-          { id: "CHECKOUT", title: "✅ Checkout" },
           { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
         ]);
       } else {
@@ -2272,21 +2284,19 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
 
+        // Project 1: text + action buttons attached as ONE interactive message.
         const addedToCartBody =
           `✅ *Added to Cart!*\n\n` +
           `📦 ${product.product_name}\n` +
           `📐 Size: *${finalSize}*\n` +
           `💰 ₹${product.price}\n` +
-          `🔢 Qty: ${quantityToUse}\n\n` +
-          `What would you like to do next?`;
+          `🔢 Qty: ${quantityToUse}`;
         await incrementStoreMessageUsage(sessionStoreId, "outgoing");
         twiml.buttons(addedToCartBody, [
           { id: "VIEW_CART", title: "👀 View Cart" },
-          { id: "CHECKOUT", title: "✅ Checkout" },
           { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
         ]);
       }
-
       await supabase
         .from("user_sessions")
         .update({
@@ -2446,12 +2456,10 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             `📦 ${product.product_name}\n` +
             `📐 Size: *${finalSize}*\n` +
             `💰 ₹${product.price}\n` +
-            `🔢 Qty: ${quantityToAdd}\n\n` +
-            `What would you like to do next?`;
+            `🔢 Qty: ${quantityToAdd}`;
           await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
           twiml.buttons(voiceAddedBody, [
             { id: "VIEW_CART", title: "👀 View Cart" },
-            { id: "CHECKOUT", title: "✅ Checkout" },
             { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
           ]);
           return sendTwiml(res, twiml);
@@ -2513,12 +2521,10 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `✅ *Added to Cart!*\n\n` +
         `📦 ${product.product_name}\n` +
         `💰 ₹${product.price}\n` +
-        `🔢 Qty: ${quantityToAdd}\n\n` +
-        `What would you like to do next?`;
+        `🔢 Qty: ${quantityToAdd}`;
       await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
       twiml.buttons(freeSizeAddedBody, [
         { id: "VIEW_CART", title: "👀 View Cart" },
-        { id: "CHECKOUT", title: "✅ Checkout" },
         { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
       ]);
       return sendTwiml(res, twiml);
@@ -2564,19 +2570,115 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
       reply += `─────────────────\n`;
       reply += `🧾 *Total: ₹${total}*\n`;
-      reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart\n\n`;
-      reply += `🎟️ Have a coupon? Type *COUPON YOURCODE*`;
+      reply += `📦 ${itemCount} item${itemCount > 1 ? "s" : ""} in cart`;
+
+      // Project 1: cart text + action buttons attached as ONE interactive
+      // message. Coupon instruction removed (coupon flow still works during
+      // checkout). Remove Item added per requirement #7/#10.
+      await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      twiml.buttons(reply, [
+        { id: "CHECKOUT", title: "✅ Checkout" },
+        { id: "REMOVE_ITEM", title: "🗑️ Remove Item" },
+        { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
+      ]);
+      return sendTwiml(res, twiml);
+    }
+    
+    // ✅ 12b. REMOVE ITEM — show cart as an interactive list to remove from
+    if (msgUpper === "REMOVE_ITEM" || msgUpper === "REMOVE ITEM") {
+      const { data: cartItemsForRemoval } = await supabase
+        .from("cart").select("*").eq("phone_number", phone);
+
+      if (!cartItemsForRemoval || cartItemsForRemoval.length === 0) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.buttons(`🛒 Your cart is already empty.`, [
+          { id: "CONTINUE_SHOPPING", title: "🔍 Start Shopping" }
+        ]);
+        return sendTwiml(res, twiml);
+      }
+
+      const removeRows = [];
+      for (const item of cartItemsForRemoval) {
+        const { data: product } = await supabase
+          .from("products").select("product_name, price")
+          .eq("id", item.product_id).maybeSingle();
+        removeRows.push({
+          id: `REMOVE_CART_${item.id}`,
+          title: (product?.product_name || "Item").slice(0, 24),
+          description: `${item.size || 'Free Size'} · Qty ${item.quantity}${product?.price ? ` · ₹${product.price}` : ''}`.slice(0, 72)
+        });
+      }
 
       await incrementStoreMessageUsage(activeStoreId, "outgoing");
-      twiml.message(reply);
+      twiml.list(
+        `🗑️ Which item would you like to remove?`,
+        "Select Item",
+        [{ title: "Cart Items", rows: removeRows.slice(0, 10) }]
+      );
+      return sendTwiml(res, twiml);
+    }
+
+    // ✅ 12c. REMOVE_CART_<id> — perform the removal (store-isolated: cart
+    // rows are matched on phone_number, which is already scoped to this
+    // customer, so no cross-store/cross-customer leak is possible)
+    if (msgUpper.startsWith("REMOVE_CART_")) {
+      const cartIdToRemove = msgUpper.slice("REMOVE_CART_".length);
+
+      const { data: cartRow } = await supabase
+        .from("cart").select("*")
+        .eq("id", cartIdToRemove)
+        .eq("phone_number", phone)
+        .maybeSingle();
+
+      if (!cartRow) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Item not found in your cart. It may have already been removed.`);
+        return sendTwiml(res, twiml);
+      }
+
+      await supabase.from("cart").delete().eq("id", cartIdToRemove).eq("phone_number", phone);
+
+      const { data: remainingCart } = await supabase
+        .from("cart").select("*").eq("phone_number", phone);
+
+      if (!remainingCart || remainingCart.length === 0) {
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.buttons(`✅ Item removed from your cart.\n\n🛒 Your cart is now empty.`, [
+          { id: "CONTINUE_SHOPPING", title: "🔍 Start Shopping" }
+        ]);
+        return sendTwiml(res, twiml);
+      }
+
+      let updatedReply = `✅ *Item removed from your cart.*\n\n🛒 *Your Cart*\n\n`;
+      let updatedTotal = 0;
+      let updatedCount = 0;
+
+      for (let i = 0; i < remainingCart.length; i++) {
+        const { data: product } = await supabase
+          .from("products").select("*")
+          .eq("id", remainingCart[i].product_id).maybeSingle();
+        if (product) {
+          const itemTotal = product.price * remainingCart[i].quantity;
+          updatedTotal += itemTotal;
+          updatedCount++;
+          updatedReply += `${updatedCount}. *${product.product_name}*\n`;
+          updatedReply += `   📐 Size: ${remainingCart[i].size || 'Free Size'}\n`;
+          updatedReply += `   💰 ₹${product.price} × ${remainingCart[i].quantity} = ₹${itemTotal}\n\n`;
+        }
+      }
+
+      updatedReply += `─────────────────\n🧾 *Total: ₹${updatedTotal}*\n📦 ${updatedCount} item${updatedCount > 1 ? "s" : ""} in cart`;
+
       await incrementStoreMessageUsage(activeStoreId, "outgoing");
-      twiml.buttons(`Ready to checkout?`, [
+      twiml.buttons(updatedReply, [
         { id: "CHECKOUT", title: "✅ Checkout" },
-        { id: "CONTINUE_SHOPPING", title: "🔍 Continue Shopping" }
+        { id: "REMOVE_ITEM", title: "🗑️ Remove Item" },
+        { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
       ]);
       return sendTwiml(res, twiml);
     }
 
+    
     // ✅ 13. CHECKOUT — top level
     if (msgUpper === "CHECKOUT") {
       const { data: cartCheck } = await supabase
@@ -2706,16 +2808,13 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         const actionStepAddedBody =
           `✅ *Added to Cart!*\n\n` +
           `📦 ${product.product_name}\n` +
-          `💰 ₹${product.price}\n\n` +
-          `What would you like to do next?`;
+          `💰 ₹${product.price}`;
         await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
         twiml.buttons(actionStepAddedBody, [
           { id: "VIEW_CART", title: "👀 View Cart" },
-          { id: "CHECKOUT", title: "✅ Checkout" },
           { id: "CONTINUE_SHOPPING", title: "🔍 Continue" }
         ]);
         return sendTwiml(res, twiml);
-      }
 
       if (msgUpper === "CART") {
         const { data: cartItems } = await supabase
@@ -2929,7 +3028,11 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
     return sendTwiml(res, twiml);
 
-  } catch (error) {
+  try {
+
+  }
+
+    catch (error) {
     console.error("❌ Error:", error.stack || error.message);
     try {
       await sendWhatsAppMessage(phone, `⚠️ Something went wrong on our end. Please try again in a moment!`);
