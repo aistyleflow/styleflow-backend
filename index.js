@@ -657,18 +657,18 @@ if (productResult.status === "multiple_matches") {
 
   reply += `\nPlease reply with the product number you want.`;
 
-  // ✅ Persist the pending voice multiple-match state so that the next
-  // numeric reply ("1", "2", ...) is interpreted as a product selection
-  // instead of falling into the size handler or the unrelated text-search
-  // "last_results" number handler. Reuses the existing voice_pending_product
-  // field — no new state variable.
+  // ✅ Persist the pending voice multiple-match state using only EXISTING
+  // columns: last_results (JSONB, reused as an object instead of the plain
+  // array normal text search stores) + action_step as the discriminator
+  // checked before other handlers. Uses only existing columns.
   try {
-    const voiceMultiMatchPayload = JSON.stringify({
-      status: "multiple_matches",
+    const voiceMultiMatchPayload = {
+      voice_pending: true,
+      type: "multiple_matches",
       matches: productResult.matches.map(p => ({ id: p.id })),
       size: voiceResult.size || null,
       quantity: voiceResult.quantity || 1
-    });
+    };
 
     const { data: existingSession, error: sessionFetchError } = await supabase
       .from("user_sessions")
@@ -681,7 +681,7 @@ if (productResult.status === "multiple_matches") {
     } else if (existingSession) {
       const { error: updateError } = await supabase
         .from("user_sessions")
-        .update({ voice_pending_product: voiceMultiMatchPayload })
+        .update({ last_results: voiceMultiMatchPayload, action_step: "voice_multi_pending" })
         .eq("phone_number", phone);
       if (updateError) {
         console.error("❌ Failed to save voice multiple_matches state (update):", updateError.message);
@@ -689,7 +689,7 @@ if (productResult.status === "multiple_matches") {
     } else {
       const { error: insertError } = await supabase
         .from("user_sessions")
-        .insert({ phone_number: phone, voice_pending_product: voiceMultiMatchPayload });
+        .insert({ phone_number: phone, last_results: voiceMultiMatchPayload, action_step: "voice_multi_pending" });
       if (insertError) {
         console.error("❌ Failed to save voice multiple_matches state (insert):", insertError.message);
       }
@@ -711,15 +711,19 @@ if (productResult.status === "matched") {
   // 1) selected_product_id gets the REAL Supabase product ID.
   await saveSelectedProduct(phone, product.id);
 
-  // 2) voice_pending_product carries the voice-requested size/quantity
-  //    so the existing ADD section can read it later. Size is preserved
-  //    as-is (null when not spoken) — no forced "Free Size" here.
+  // 2) Voice-requested size/quantity is carried in last_results (JSONB,
+  //    reused as an object) + action_step="voice_single_pending" as the
+  //    discriminator, so the existing ADD/SIZE STEP logic can read it later.
+  //    Size is preserved as-is (null when not spoken) — no forced
+  //    "Free Size" here. Uses only existing columns (last_results + action_step).
   try {
-    const voicePendingPayload = JSON.stringify({
+    const voiceSinglePayload = {
+      voice_pending: true,
+      type: "single_match",
       product_id: product.id,
       size: productResult.size || null,
       quantity: productResult.quantity || 1
-    });
+    };
 
     const { data: existingSession, error: sessionFetchError } = await supabase
       .from("user_sessions")
@@ -728,25 +732,25 @@ if (productResult.status === "matched") {
       .maybeSingle();
 
     if (sessionFetchError) {
-      console.error("❌ Failed to fetch session for voice_pending_product:", sessionFetchError.message);
+      console.error("❌ Failed to fetch session for voice single_match state:", sessionFetchError.message);
     } else if (existingSession) {
       const { error: updateError } = await supabase
         .from("user_sessions")
-        .update({ voice_pending_product: voicePendingPayload })
+        .update({ last_results: voiceSinglePayload, action_step: "voice_single_pending" })
         .eq("phone_number", phone);
       if (updateError) {
-        console.error("❌ Failed to save voice_pending_product (update):", updateError.message);
+        console.error("❌ Failed to save voice single_match state (update):", updateError.message);
       }
     } else {
       const { error: insertError } = await supabase
         .from("user_sessions")
-        .insert({ phone_number: phone, voice_pending_product: voicePendingPayload });
+        .insert({ phone_number: phone, last_results: voiceSinglePayload, action_step: "voice_single_pending" });
       if (insertError) {
-        console.error("❌ Failed to save voice_pending_product (insert):", insertError.message);
+        console.error("❌ Failed to save voice single_match state (insert):", insertError.message);
       }
     }
   } catch (sessionErr) {
-    console.error("❌ Failed to save voice_pending_product:", sessionErr.message);
+    console.error("❌ Failed to save voice single_match state:", sessionErr.message);
   }
 
   const caption =
@@ -1845,81 +1849,81 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     // Must run BEFORE the SIZE STEP handler and BEFORE the normal text
     // "NUMBER CHECK" handler, so a numeric reply to a voice multiple-match
     // prompt is never misread as a size or as a text-search selection.
-    // Only activates when voice_pending_product actually holds a pending
-    // multiple_matches state — normal text flow (which uses last_results,
-    // not voice_pending_product) is completely unaffected.
-    {
-      const voiceMultiState = session?.voice_pending_product
-        ? (typeof session.voice_pending_product === 'string'
-            ? (() => { try { return JSON.parse(session.voice_pending_product); } catch (e) { return null; } })()
-            : session.voice_pending_product)
+    // Uses only EXISTING columns: action_step as the discriminator, and
+    // last_results (JSONB) reused as an object instead of the plain array
+    // normal text search stores there. Uses only existing columns.
+    if (session?.action_step === "voice_multi_pending" && /^[0-9]+$/.test(msg.trim())) {
+      const voiceMultiState = session?.last_results && !Array.isArray(session.last_results)
+        ? session.last_results
         : null;
 
-      if (voiceMultiState && voiceMultiState.status === "multiple_matches" && /^[0-9]+$/.test(msg.trim())) {
-        const chosenIndex = parseInt(msg.trim(), 10) - 1;
-        const matches = Array.isArray(voiceMultiState.matches) ? voiceMultiState.matches : [];
+      const chosenIndex = parseInt(msg.trim(), 10) - 1;
+      const matches = voiceMultiState && Array.isArray(voiceMultiState.matches) ? voiceMultiState.matches : [];
 
-        if (chosenIndex < 0 || chosenIndex >= matches.length) {
-          await incrementStoreMessageUsage(activeStoreId, "outgoing");
-          twiml.message(`⚠️ Invalid selection. Choose between *1* and *${matches.length}*`);
-          return sendTwiml(res, twiml);
-        }
-
-        const chosenId = matches[chosenIndex]?.id;
-
-        const { data: chosenProduct } = await supabase
-          .from("products").select("*")
-          .eq("id", chosenId).maybeSingle();
-
-        if (!chosenProduct) {
-          await supabase.from("user_sessions")
-            .update({ voice_pending_product: null })
-            .eq("phone_number", phone);
-          await incrementStoreMessageUsage(activeStoreId, "outgoing");
-          twiml.message(`⚠️ Product not found. Please search again!`);
-          return sendTwiml(res, twiml);
-        }
-
-        // ✅ Reuse the existing selection mechanism — real product ID only.
-        await saveSelectedProduct(phone, chosenProduct.id);
-
-        // ✅ Collapse the multi-match state into the normal single-product
-        // voice_pending_product shape so the existing (already-fixed) ADD
-        // and SIZE STEP logic handles it exactly like a direct voice match.
-        const collapsedPayload = JSON.stringify({
-          product_id: chosenProduct.id,
-          size: voiceMultiState.size || null,
-          quantity: voiceMultiState.quantity || 1
-        });
-
-        const { error: collapseError } = await supabase
-          .from("user_sessions")
-          .update({ voice_pending_product: collapsedPayload, action_step: "product_action" })
-          .eq("phone_number", phone);
-
-        if (collapseError) {
-          console.error("❌ Failed to save selected voice product state:", collapseError.message);
-        }
-
-        const requestedSize = voiceMultiState.size || "Free Size";
-        const quantity = voiceMultiState.quantity || 1;
-
-        const caption =
-          `🛍️ *${chosenProduct.product_name}*\n\n` +
-          `💰 Price: ₹${chosenProduct.price}\n` +
-          `📏 Size: ${requestedSize}\n` +
-          `🔢 Quantity: ${quantity}\n` +
-          `📦 Stock: ${chosenProduct.stock}\n\n` +
-          `Reply *ADD* to add this product to your cart.`;
-
+      if (!voiceMultiState || chosenIndex < 0 || chosenIndex >= matches.length) {
+        await supabase.from("user_sessions").update({ action_step: null, last_results: null }).eq("phone_number", phone);
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
-        if (chosenProduct.image_url) {
-          await sendWhatsAppImage(phone, chosenProduct.image_url, caption);
-        } else {
-          await sendWhatsAppMessage(phone, caption);
-        }
-        return;
+        twiml.message(matches.length ? `⚠️ Invalid selection. Choose between *1* and *${matches.length}*` : `⚠️ Session expired. Please search again!`);
+        return sendTwiml(res, twiml);
       }
+
+      const chosenId = matches[chosenIndex]?.id;
+
+      const { data: chosenProduct } = await supabase
+        .from("products").select("*")
+        .eq("id", chosenId).maybeSingle();
+
+      if (!chosenProduct) {
+        await supabase.from("user_sessions")
+          .update({ action_step: null, last_results: null })
+          .eq("phone_number", phone);
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        twiml.message(`⚠️ Product not found. Please search again!`);
+        return sendTwiml(res, twiml);
+      }
+
+      // ✅ Reuse the existing selection mechanism — real product ID only.
+      await saveSelectedProduct(phone, chosenProduct.id);
+
+      // ✅ Collapse the multi-match state into the single-match voice shape,
+      // stored in last_results with action_step="voice_single_pending", so
+      // the existing (already-fixed) ADD / SIZE STEP logic below handles it
+      // exactly like a direct voice match — no separate code path.
+      const collapsedPayload = {
+        voice_pending: true,
+        type: "single_match",
+        product_id: chosenProduct.id,
+        size: voiceMultiState.size || null,
+        quantity: voiceMultiState.quantity || 1
+      };
+
+      const { error: collapseError } = await supabase
+        .from("user_sessions")
+        .update({ last_results: collapsedPayload, action_step: "voice_single_pending" })
+        .eq("phone_number", phone);
+
+      if (collapseError) {
+        console.error("❌ Failed to save selected voice product state:", collapseError.message);
+      }
+
+      const requestedSize = voiceMultiState.size || "Free Size";
+      const quantity = voiceMultiState.quantity || 1;
+
+      const caption =
+        `🛍️ *${chosenProduct.product_name}*\n\n` +
+        `💰 Price: ₹${chosenProduct.price}\n` +
+        `📏 Size: ${requestedSize}\n` +
+        `🔢 Quantity: ${quantity}\n` +
+        `📦 Stock: ${chosenProduct.stock}\n\n` +
+        `Reply *ADD* to add this product to your cart.`;
+
+      await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      if (chosenProduct.image_url) {
+        await sendWhatsAppImage(phone, chosenProduct.image_url, caption);
+      } else {
+        await sendWhatsAppMessage(phone, caption);
+      }
+      return;
     }
 
     // ✅ 9. SIZE STEP
@@ -1952,13 +1956,12 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       const finalSize = availableSizes.length > 0 ? enteredSize : msg.trim();
 
       // ✅ Preserve voice-requested quantity (Case 2): if a still-pending
-      // voice order belongs to this product, use its quantity instead of
-      // defaulting to 1. Normal text ADD is unaffected (voicePendingForSize
-      // is null when there's no matching pending voice data).
-      const voicePendingForSize = session?.voice_pending_product
-        ? (typeof session.voice_pending_product === 'string'
-            ? JSON.parse(session.voice_pending_product)
-            : session.voice_pending_product)
+      // voice single-match state belongs to this product, use its quantity
+      // instead of defaulting to 1. Normal text ADD is unaffected
+      // (voicePendingForSize is null when there's no matching pending
+      // voice data — action_step won't be "voice_single_pending").
+      const voicePendingForSize = (session?.action_step === "voice_single_pending" && session?.last_results && !Array.isArray(session.last_results))
+        ? session.last_results
         : null;
       const voiceQuantityMatches = !!(voicePendingForSize && voicePendingForSize.product_id === session.selected_product_id);
       const quantityToUse = voiceQuantityMatches ? (voicePendingForSize.quantity || 1) : 1;
@@ -2024,7 +2027,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         .update({
           checkout_step: null,
           action_step: "product_action",
-          voice_pending_product: voiceQuantityMatches ? null : undefined
+          last_results: voiceQuantityMatches ? null : undefined
         })
         .eq("phone_number", phone);
 
@@ -2067,15 +2070,17 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     // ✅ 11. ADD — top level
     if (msgUpper === "ADD") {
 
-      // ✅ Check for voice-order pending product in session
-      const voicePending = session?.voice_pending_product
-        ? (typeof session.voice_pending_product === 'string'
-            ? JSON.parse(session.voice_pending_product)
-            : session.voice_pending_product)
+      // ✅ Check for voice-order pending product in session (action_step
+      // discriminator + last_results reused as an object).
+      const voicePending = (session?.action_step === "voice_single_pending" && session?.last_results && !Array.isArray(session.last_results))
+        ? session.last_results
         : null;
 
-      // ✅ Determine which product ID to use — voice pending takes priority if no selected_product_id
-      const productIdToUse = session?.selected_product_id || voicePending?.product_id || null;
+      // ✅ Priority fix: a CURRENT valid voice pending product must take
+      // priority over a stale selected_product_id from an older normal
+      // text selection. Previously selected_product_id always won even
+      // when it was stale, which could point ADD at the wrong product.
+      const productIdToUse = voicePending?.product_id || session?.selected_product_id || null;
 
       if (!productIdToUse) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
@@ -2164,7 +2169,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
           // ✅ Clear voice pending from session (it was consumed here)
           await supabase.from("user_sessions")
-            .update({ action_step: "product_action", voice_pending_product: null })
+            .update({ action_step: "product_action", last_results: null })
             .eq("phone_number", phone);
 
           await incrementStoreMessageUsage(product.store_id || activeStoreId, "outgoing");
@@ -2224,7 +2229,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       await supabase.from("user_sessions")
         .update({
           action_step: "product_action",
-          voice_pending_product: voicePendingMatches ? null : undefined
+          last_results: voicePendingMatches ? null : undefined
         })
         .eq("phone_number", phone);
 
