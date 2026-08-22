@@ -888,7 +888,8 @@ if (productResult.status === "matched") {
   }
 
   const caption =
-    `🛍️ *${product.product_name}*\n\n` +
+    `🛍️ *Product Details*\n\n` +
+    `📦 Product: ${product.product_name}\n` +
     `💰 Price: ₹${product.price}\n` +
     `📏 Size: ${requestedSize}\n` +
     `🔢 Quantity: ${quantity}\n` +
@@ -896,21 +897,21 @@ if (productResult.status === "matched") {
 
   const addButtons = [{ id: "ADD_PRODUCT", title: "🛒 Add to Cart" }];
 
-  let imageSent = false;
+  // Image (if any) is sent as its own message first — Meta doesn't allow
+  // image + interactive buttons in one payload. The product DETAILS text
+  // and the Add to Cart button are always the SAME message, sent right
+  // after, regardless of whether the image succeeded — this removes the
+  // inconsistency where a successful image send used to trigger a
+  // disconnected "What would you like to do next?" message instead.
   if (product.image_url) {
     const accessible = await isImageAccessible(product.image_url);
     if (accessible) {
-      imageSent = await sendWhatsAppImageMessage(phone, product.image_url, caption);
+      await sendWhatsAppImageMessage(phone, product.image_url, product.product_name);
     }
   }
 
-  if (imageSent) {
-    const buttonsSent = await sendWhatsAppButtons(phone, `What would you like to do next?`, addButtons);
-    if (!buttonsSent) await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
-  } else {
-    const buttonsSent = await sendWhatsAppButtons(phone, caption, addButtons);
-    if (!buttonsSent) await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
-  }
+  const buttonsSent = await sendWhatsAppButtons(phone, caption, addButtons);
+  if (!buttonsSent) await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
 
   return;
 }
@@ -2145,27 +2146,22 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       const quantity = voiceMultiState.quantity || 1;
 
       const caption =
-        `🛍️ *${chosenProduct.product_name}*\n\n` +
+        `🛍️ *Product Details*\n\n` +
+        `📦 Product: ${chosenProduct.product_name}\n` +
         `💰 Price: ₹${chosenProduct.price}\n` +
         `📏 Size: ${requestedSize}\n` +
         `🔢 Quantity: ${quantity}\n` +
         `📦 Stock: ${chosenProduct.stock}`;
 
+      // Same fix as the direct voice single-match path: image (if any) sent
+      // first as its own message, then product DETAILS + Add to Cart button
+      // always sent together as one message — no disconnected
+      // "What would you like to do next?" message regardless of image outcome.
       if (chosenProduct.image_url) {
         const accessible = await isImageAccessible(chosenProduct.image_url);
         if (accessible) {
-          await sendWhatsAppImageMessage(phone, chosenProduct.image_url, caption);
-          await incrementStoreMessageUsage(activeStoreId, "outgoing");
-          const buttonsSent = await sendWhatsAppButtons(phone, `What would you like to do next?`, [
-            { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
-          ]);
-          if (buttonsSent) {
-            await incrementStoreMessageUsage(activeStoreId, "outgoing");
-          } else {
-            await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
-            await incrementStoreMessageUsage(activeStoreId, "outgoing");
-          }
-          return;
+          const imgSent = await sendWhatsAppImageMessage(phone, chosenProduct.image_url, chosenProduct.product_name);
+          if (imgSent) await incrementStoreMessageUsage(activeStoreId, "outgoing");
         }
       }
 
@@ -2180,7 +2176,6 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       }
       return;
     }
-
     // ✅ 9. SIZE STEP
     // ✅ Guard: control commands (text or interactive ID form) are NOT size
     // replies — let them fall through to their authoritative handlers below
