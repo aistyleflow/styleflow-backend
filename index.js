@@ -642,7 +642,7 @@ async function sendProductMessage(phone, product, storeId) {
       const accessible = await isImageAccessible(product.image_url);
       if (accessible) {
         console.log("📷 Sending product with image via Meta Cloud API");
-        imageSent = await sendWhatsAppImageMessage(phone, product.image_url, bodyText);
+        imageSent = await sendWhatsAppImageMessage(phone, product.image_url, product.product_name);
         if (!imageSent) console.log("⚠️ Image send failed — continuing with text/buttons");
       } else {
         console.log("⚠️ Image not accessible — sending text only");
@@ -651,7 +651,7 @@ async function sendProductMessage(phone, product, storeId) {
 
     if (imageSent) {
       if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-      const buttonsSent = await sendWhatsAppButtons(phone, `*${product.product_name}* — ₹${product.price}`, productButtons);
+      const buttonsSent = await sendWhatsAppButtons(phone, bodyText, productButtons);
       if (buttonsSent) {
         if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
       } else {
