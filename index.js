@@ -39,6 +39,16 @@ const META_GRAPH_URL = `https://graph.facebook.com/${META_GRAPH_VERSION}/${META_
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const META_MEDIA_BASE_URL = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 
+// ─────────────────────────────────────────────────────────
+// RAZORPAY — PHASE 2 CONFIG
+// Order creation only. No verification/webhook logic yet.
+// ─────────────────────────────────────────────────────────
+const Razorpay = require("razorpay");
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET
+});
+
 const GREETINGS = ["hi", "hello", "hey", "helo", "hii", "start", "namaste"];
 
 function formatDate(dateString) {
@@ -401,6 +411,54 @@ async function validateCoupon(couponCode, storeId, orderTotal) {
   } catch (err) {
     console.error("❌ validateCoupon error:", err.message);
     return { valid: false, reason: "error" };
+  }
+}
+
+// ─────────────────────────────────────────────────────────
+// createRazorpayOrder — Phase 2: creates a Razorpay Order for the
+// customer's current UPI payment attempt and stores its ID in
+// user_sessions.razorpay_order_id. Does NOT create a StyleFlow order
+// row and does NOT mark any payment as successful — placeOrder()
+// remains the only place a real order/payment_status is written.
+// Returns { success, razorpayOrderId } or { success: false, error }.
+// ─────────────────────────────────────────────────────────
+async function createRazorpayOrder(phone, session, orderTotal) {
+  try {
+    // Reuse an existing pending Razorpay order for this session instead
+    // of creating a duplicate one.
+    if (session?.razorpay_order_id) {
+      return { success: true, razorpayOrderId: session.razorpay_order_id, reused: true };
+    }
+
+    const amountInPaise = Math.round(Number(orderTotal) * 100);
+
+    const razorpayOrder = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: `styleflow_${phone}_${Date.now()}`
+    });
+
+    if (!razorpayOrder || !razorpayOrder.id) {
+      console.error("❌ createRazorpayOrder: no order id returned by Razorpay");
+      return { success: false, error: "no_order_id_returned" };
+    }
+
+    const { error: updateError } = await supabase
+      .from("user_sessions")
+      .update({ razorpay_order_id: razorpayOrder.id })
+      .eq("phone_number", phone);
+
+    if (updateError) {
+      console.error("❌ createRazorpayOrder: failed to save razorpay_order_id to session:", updateError.message);
+      return { success: false, error: "session_save_failed" };
+    }
+
+    console.log("✅ Razorpay order created:", razorpayOrder.id, "amount(paise):", amountInPaise);
+    return { success: true, razorpayOrderId: razorpayOrder.id, reused: false };
+
+  } catch (err) {
+    console.error("❌ createRazorpayOrder error:", err.message);
+    return { success: false, error: err.message };
   }
 }
 
@@ -1660,6 +1718,14 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         if (!upiId) {
           await incrementStoreMessageUsage(storeId, "outgoing");
           twiml.message(`⚠️ UPI payment is not configured for this store.\n\nPlease type *1* for Cash on Delivery or contact *${shopName}*.`);
+          return sendTwiml(res, twiml);
+        }
+
+        const razorpayResult = await createRazorpayOrder(phone, session, orderTotal);
+
+        if (!razorpayResult.success) {
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.message(`⚠️ We couldn't set up UPI payment right now. Please try again in a moment, or type *1* for Cash on Delivery.`);
           return sendTwiml(res, twiml);
         }
 
@@ -3114,6 +3180,7 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
       payment_amount: orderTotal,
       coupon_code: session.applied_coupon_code || null,
       discount_amount: session.applied_discount_amount || 0,
+      razorpay_order_id: paymentMethod === "UPI" ? (session.razorpay_order_id || null) : null,
       created_at: new Date().toISOString()
     };
 
@@ -3184,7 +3251,8 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
         checkout_step: null,
         action_step: null,
         applied_coupon_code: null,
-        applied_discount_amount: null
+        applied_discount_amount: null,
+        razorpay_order_id: null
       })
       .eq("phone_number", phone);
 
