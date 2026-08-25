@@ -1742,8 +1742,44 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           .update({ checkout_step: "awaiting_payment", payment_method: "UPI" })
           .eq("phone_number", phone);
 
+        // Create a Razorpay Payment Link tied to the existing Razorpay Order
+        // (razorpayResult.razorpayOrderId). The StyleFlow `orders` row does
+        // NOT exist yet at this point (it's only created later when the
+        // customer types PAID, via placeOrder) — so we reference the
+        // Razorpay order id + phone as the identifiable receipt/notes
+        // instead of a StyleFlow order id. This does NOT mark any payment
+        // as successful and does NOT create/confirm any order.
+        let paymentLinkUrl = null;
+        try {
+          const paymentLink = await razorpay.paymentLink.create({
+            amount: Math.round(orderTotal * 100),
+            currency: "INR",
+            accept_partial: false,
+            description: `Payment for order at ${shopName}`,
+            customer: {
+              contact: phone
+            },
+            notify: { sms: false, email: false },
+            reference_id: `styleflow_${razorpayResult.razorpayOrderId}`,
+            notes: {
+              razorpay_order_id: razorpayResult.razorpayOrderId,
+              phone: phone,
+              store_id: String(storeId)
+            }
+          });
+          paymentLinkUrl = paymentLink?.short_url || null;
+        } catch (linkErr) {
+          console.error("❌ Razorpay Payment Link creation error:", linkErr.message);
+        }
+
+        if (!paymentLinkUrl) {
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.message(`⚠️ We couldn't generate the payment link right now. Please try again in a moment, or type *1* for Cash on Delivery.`);
+          return sendTwiml(res, twiml);
+        }
+
         let upiMsg =
-          `📱 *Pay with UPI*\n\n` +
+          `📱 *Complete Your Online Payment*\n\n` +
           `🧾 Amount: *₹${orderTotal}*\n`;
 
         if (session.applied_coupon_code) {
@@ -1751,40 +1787,23 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         }
 
         upiMsg +=
-          `\n🏪 Pay to: *${shopName}*\n` +
-          `📲 UPI ID: *${upiId}*\n\n`;
+          `\n🏪 Pay to: *${shopName}*\n\n` +
+          `👉 Pay Now: ${paymentLinkUrl}\n\n`;
 
         if (instructions) upiMsg += `ℹ️ ${instructions}\n\n`;
-        upiMsg += `─────────────────\nAfter paying, type *PAID* to confirm ✅\nOr type *CANCEL* to cancel this order.`;
+        upiMsg += `─────────────────\nOr type *CANCEL* to cancel this order.`;
 
+        // Sent via the existing WhatsApp function (not twiml.message) since
+        // this message carries a dynamically-generated Payment Link. The
+        // HTTP request must still be closed exactly once, so sendTwiml is
+        // called on the (empty) twiml object afterward purely to flush/end
+        // the response — it queues no additional message, so no duplicate
+        // WhatsApp send occurs.
         await incrementStoreMessageUsage(storeId, "outgoing");
-        twiml.message(upiMsg);
-        await sendTwiml(res, twiml);
+        await sendWhatsAppMessage(phone, upiMsg);
 
-        if (qrCodeUrl) {
-          const accessible = await isImageAccessible(qrCodeUrl);
-          if (accessible) {
-            const qrSent = await sendWhatsAppImageMessage(
-              phone,
-              qrCodeUrl,
-              `📷 *Scan to pay ₹${orderTotal}*\n\nAfter paying, type *PAID* to confirm.`
-            );
-            if (qrSent) {
-              await incrementStoreMessageUsage(storeId, "outgoing");
-            } else {
-              console.error("❌ QR send failed via Meta API");
-              await sendWhatsAppMessage(phone, `⚠️ QR code could not be sent.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
-              await incrementStoreMessageUsage(storeId, "outgoing");
-            }
-          } else {
-            await sendWhatsAppMessage(phone, `⚠️ QR code could not be loaded.\n\nPlease pay to UPI ID: *${upiId}*\n\nAfter paying, type *PAID* to confirm.`);
-            await incrementStoreMessageUsage(storeId, "outgoing");
-          }
-        }
-
-        return;
+        return sendTwiml(res, twiml);
       }
-
       if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
         const couponCode = msg.replace(/^coupon:?\s*/i, "").trim();
         if (!couponCode) {
