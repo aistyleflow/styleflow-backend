@@ -955,21 +955,29 @@ if (productResult.status === "matched") {
 
   const addButtons = [{ id: "ADD_PRODUCT", title: "🛒 Add to Cart" }];
 
-  // Image (if any) is sent as its own message first — Meta doesn't allow
-  // image + interactive buttons in one payload. The product DETAILS text
-  // and the Add to Cart button are always the SAME message, sent right
-  // after, regardless of whether the image succeeded — this removes the
-  // inconsistency where a successful image send used to trigger a
-  // disconnected "What would you like to do next?" message instead.
+  // Image + product details are now sent as ONE message (caption attached
+  // directly to the image) instead of two separate Meta API calls. This
+  // removes the race where Meta could finish processing the lighter
+  // button message before the slower image message, causing the button
+  // to visually appear before the image on the customer's phone even
+  // though the image was sent first. The Add to Cart button is always
+  // sent as the guaranteed follow-up message, after the image+details.
+  let imageSentWithCaption = false;
   if (product.image_url) {
     const accessible = await isImageAccessible(product.image_url);
     if (accessible) {
-      await sendWhatsAppImageMessage(phone, product.image_url, product.product_name);
+      imageSentWithCaption = await sendWhatsAppImageMessage(phone, product.image_url, caption);
     }
   }
 
-  const buttonsSent = await sendWhatsAppButtons(phone, caption, addButtons);
-  if (!buttonsSent) await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
+  if (!imageSentWithCaption) {
+    // No image, or image failed — fall back to sending details as plain text
+    // before the button, so details still always precede Add to Cart.
+    await sendWhatsAppMessage(phone, caption);
+  }
+
+  const buttonsSent = await sendWhatsAppButtons(phone, `🛒 Ready to add *${product.product_name}* to your cart?`, addButtons);
+  if (!buttonsSent) await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
 
   return;
 }
@@ -2219,25 +2227,32 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `🔢 Quantity: ${quantity}\n` +
         `📦 Stock: ${chosenProduct.stock}`;
 
-      // Same fix as the direct voice single-match path: image (if any) sent
-      // first as its own message, then product DETAILS + Add to Cart button
-      // always sent together as one message — no disconnected
-      // "What would you like to do next?" message regardless of image outcome.
+      // Same fix as the voice single-match path: image + product details
+      // sent as ONE message (caption attached to the image) instead of two
+      // separate Meta API calls, removing the race where the lighter button
+      // message could visually render before the slower image message even
+      // though the image was sent first.
+      let imageSentWithCaption = false;
       if (chosenProduct.image_url) {
         const accessible = await isImageAccessible(chosenProduct.image_url);
         if (accessible) {
-          const imgSent = await sendWhatsAppImageMessage(phone, chosenProduct.image_url, chosenProduct.product_name);
-          if (imgSent) await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          imageSentWithCaption = await sendWhatsAppImageMessage(phone, chosenProduct.image_url, caption);
+          if (imageSentWithCaption) await incrementStoreMessageUsage(activeStoreId, "outgoing");
         }
       }
 
-      const buttonsSent = await sendWhatsAppButtons(phone, caption, [
+      if (!imageSentWithCaption) {
+        await sendWhatsAppMessage(phone, caption);
+        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      }
+
+      const buttonsSent = await sendWhatsAppButtons(phone, `🛒 Ready to add *${chosenProduct.product_name}* to your cart?`, [
         { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
       ]);
       if (buttonsSent) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
       } else {
-        await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
+        await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
       }
       return;
