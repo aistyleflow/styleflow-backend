@@ -199,14 +199,64 @@ app.post("/razorpay/webhook", async (req, res) => {
 
     console.log("✅ Razorpay webhook: order marked paid+confirmed:", order.id, "eventId:", eventId, "paymentId:", razorpayPaymentId);
 
-    // ── Send the existing order-confirmation WhatsApp message ──
+    // ── Cart/session cleanup, only now that payment is verified ──
+    // Mirrors the cleanup placeOrder() does on success, done once here
+    // since createPendingOnlineOrder() intentionally left the cart intact.
+    try {
+      await supabase.from("cart").delete().eq("phone_number", order.phone_number);
+      await supabase
+        .from("user_sessions")
+        .update({
+          checkout_step: null,
+          action_step: null,
+          applied_coupon_code: null,
+          applied_discount_amount: null,
+          razorpay_order_id: null,
+          pending_online_order_id: null,
+          razorpay_payment_link_url: null
+        })
+        .eq("phone_number", order.phone_number);
+    } catch (cleanupErr) {
+      console.error("❌ Razorpay webhook: cart/session cleanup failed (non-fatal):", cleanupErr.message);
+    }
+
+    // ── Send the SAME "Order Placed Successfully!" message placeOrder() sends ──
+    // Reuses messages.orderPlaced() exactly — no new/second message format.
     try {
       const shopName = await getShopName(order.store_id);
       const orderNum = order.store_order_number || order.id;
+
+      const { data: orderItems } = await supabase
+        .from("order_items")
+        .select("*")
+        .eq("order_id", order.id);
+
+      let orderSummary = "";
+      for (const item of (orderItems || [])) {
+        const itemTotal = item.price * item.quantity;
+        orderSummary += `• ${item.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
+      }
+
+      let orderMsg = messages.orderPlaced(
+        shopName,
+        order.customer_name,
+        orderSummary,
+        order.payment_amount,
+        order.customer_address,
+        orderNum,
+        formatDate(order.created_at)
+      );
+
+      if (order.coupon_code && order.discount_amount > 0) {
+        orderMsg += `\n\n🎟️ *Coupon:* ${order.coupon_code} — Saved ₹${order.discount_amount}`;
+      }
+
+      orderMsg += `\n\n📱 *Payment Method:* UPI\n✅ *Payment Status:* Paid`;
+
       await incrementStoreMessageUsage(order.store_id, "outgoing");
-      await sendWhatsAppMessage(order.phone_number, messages.orderConfirmed(shopName, orderNum));
+      await sendWhatsAppMessage(order.phone_number, orderMsg);
     } catch (msgErr) {
-      console.error("❌ Razorpay webhook: confirmation WhatsApp send failed (non-fatal):", msgErr.message);
+      console.error("❌ Razorpay webhook: order-placed WhatsApp send failed (non-fatal):", msgErr.message);
     }
 
     return res.status(200).json({ received: true, processed: true });
