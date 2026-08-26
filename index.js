@@ -7,7 +7,19 @@ const { matchProductFromVoiceRequest } = require("./productMatcher");
 const app = express();
 
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+
+// Razorpay webhook signature verification requires the exact raw request
+// body bytes. express.json() only exposes the parsed object, so for this
+// one route we capture the raw buffer via a verify callback while still
+// letting express.json() parse req.body normally for every other route —
+// no other route's JSON parsing changes.
+app.use(express.json({
+  verify: (req, res, buf) => {
+    if (req.originalUrl === "/razorpay/webhook") {
+      req.rawBody = buf;
+    }
+  }
+}));
 
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -47,6 +59,162 @@ const Razorpay = require("razorpay");
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET
+});
+
+const crypto = require("crypto");
+
+// ─────────────────────────────────────────────────────────
+// RAZORPAY WEBHOOK — Payment Link confirmation
+// Verifies signature using the raw body, maps the Payment Link
+// back to the exact StyleFlow order via orders.razorpay_payment_link_id,
+// and only then marks the order paid + sends the existing
+// order-confirmation WhatsApp message. Does not touch COD orders,
+// does not touch the existing PAID handler, does not create orders.
+// ─────────────────────────────────────────────────────────
+app.post("/razorpay/webhook", async (req, res) => {
+  try {
+    const signature = req.headers["x-razorpay-signature"];
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+
+    if (!signature) {
+      console.error("❌ Razorpay webhook: missing signature header");
+      return res.status(400).json({ error: "missing signature" });
+    }
+
+    if (!webhookSecret) {
+      console.error("❌ Razorpay webhook: RAZORPAY_WEBHOOK_SECRET not configured");
+      return res.status(500).json({ error: "webhook not configured" });
+    }
+
+    if (!req.rawBody) {
+      console.error("❌ Razorpay webhook: raw body unavailable for signature verification");
+      return res.status(400).json({ error: "invalid request" });
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", webhookSecret)
+      .update(req.rawBody)
+      .digest("hex");
+
+    const isValidSignature =
+      expectedSignature.length === signature.length &&
+      crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(signature));
+
+    if (!isValidSignature) {
+      console.error("❌ Razorpay webhook: signature verification failed");
+      return res.status(400).json({ error: "invalid signature" });
+    }
+
+    const event = req.body?.event;
+    const eventId = req.headers["x-razorpay-event-id"] || null;
+
+    if (event !== "payment_link.paid") {
+      // Acknowledge everything else (payment_link.cancelled, .expired,
+      // etc.) without touching any order — those are later phases.
+      console.log("ℹ️ Razorpay webhook: ignoring event:", event);
+      return res.status(200).json({ received: true, ignored: true });
+    }
+
+    const paymentLinkEntity = req.body?.payload?.payment_link?.entity;
+    const paymentEntity = req.body?.payload?.payment?.entity;
+
+    const paymentLinkId = paymentLinkEntity?.id || null;
+    const razorpayPaymentId = paymentEntity?.id || null;
+    const paidAmount = paymentLinkEntity?.amount_paid ?? paymentEntity?.amount ?? null;
+    const currency = paymentLinkEntity?.currency || paymentEntity?.currency || null;
+    const referenceId = paymentLinkEntity?.reference_id || null;
+
+    if (!paymentLinkId || !razorpayPaymentId) {
+      console.error("❌ Razorpay webhook: payment_link.paid missing required ids", {
+        eventId, hasPaymentLinkId: !!paymentLinkId, hasPaymentId: !!razorpayPaymentId
+      });
+      // Malformed payload we can't act on — acknowledge so Razorpay
+      // doesn't retry indefinitely on something that will never resolve.
+      return res.status(200).json({ received: true, error: "missing_ids" });
+    }
+
+    // ── Identify the exact StyleFlow order via the Payment Link ID ──
+    const { data: order, error: orderFetchError } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("razorpay_payment_link_id", paymentLinkId)
+      .maybeSingle();
+
+    if (orderFetchError) {
+      console.error("❌ Razorpay webhook: order lookup failed:", orderFetchError.message);
+      return res.status(500).json({ error: "lookup_failed" });
+    }
+
+    if (!order) {
+      console.error("❌ Razorpay webhook: no StyleFlow order found for payment_link_id:", paymentLinkId, "reference_id:", referenceId);
+      // Nothing to map to — acknowledge so this specific unmapped event
+      // isn't retried forever, per spec.
+      return res.status(200).json({ received: true, error: "order_not_found" });
+    }
+
+    // Cross-check the StyleFlow reference embedded in the Payment Link,
+    // when present, against the order we found by payment_link_id.
+    if (referenceId && referenceId !== `styleflow_order_${order.id}`) {
+      console.error("❌ Razorpay webhook: reference_id mismatch", {
+        referenceId, expected: `styleflow_order_${order.id}`, orderId: order.id
+      });
+      return res.status(200).json({ received: true, error: "reference_mismatch" });
+    }
+
+    // ── Idempotency: already-paid orders must not be reprocessed ──
+    if (order.payment_status === "paid") {
+      console.log("ℹ️ Razorpay webhook: order already paid, skipping:", order.id, "eventId:", eventId);
+      return res.status(200).json({ received: true, already_processed: true });
+    }
+
+    // ── Verify amount and currency before marking anything paid ──
+    const expectedAmountPaise = Math.round(Number(order.payment_amount) * 100);
+    if (paidAmount === null || Number(paidAmount) !== expectedAmountPaise) {
+      console.error("❌ Razorpay webhook: amount mismatch", {
+        orderId: order.id, expectedAmountPaise, paidAmount
+      });
+      return res.status(200).json({ received: true, error: "amount_mismatch" });
+    }
+
+    if (currency && currency !== "INR") {
+      console.error("❌ Razorpay webhook: unexpected currency", { orderId: order.id, currency });
+      return res.status(200).json({ received: true, error: "currency_mismatch" });
+    }
+
+    // ── Update Supabase: mark paid + confirmed ──
+    const { error: updateError } = await supabase
+      .from("orders")
+      .update({
+        razorpay_payment_id: razorpayPaymentId,
+        payment_status: "paid",
+        status: "confirmed"
+      })
+      .eq("id", order.id)
+      .eq("payment_status", order.payment_status); // guards against a race with a second webhook delivery
+
+    if (updateError) {
+      console.error("❌ Razorpay webhook: order update failed:", updateError.message);
+      return res.status(500).json({ error: "update_failed" });
+    }
+
+    console.log("✅ Razorpay webhook: order marked paid+confirmed:", order.id, "eventId:", eventId, "paymentId:", razorpayPaymentId);
+
+    // ── Send the existing order-confirmation WhatsApp message ──
+    try {
+      const shopName = await getShopName(order.store_id);
+      const orderNum = order.store_order_number || order.id;
+      await incrementStoreMessageUsage(order.store_id, "outgoing");
+      await sendWhatsAppMessage(order.phone_number, messages.orderConfirmed(shopName, orderNum));
+    } catch (msgErr) {
+      console.error("❌ Razorpay webhook: confirmation WhatsApp send failed (non-fatal):", msgErr.message);
+    }
+
+    return res.status(200).json({ received: true, processed: true });
+
+  } catch (err) {
+    console.error("❌ Razorpay webhook: unexpected error:", err.message);
+    return res.status(500).json({ error: "internal_error" });
+  }
 });
 
 const GREETINGS = ["hi", "hello", "hey", "helo", "hii", "start", "namaste"];
