@@ -458,9 +458,27 @@ function isInActiveOrderFlow(session) {
   return activeSteps.includes(session.checkout_step);
 }
 
-async function clearOrderSession(phone) {
+async function clearOrderSession(phone, session = null) {
   try {
     await supabase.from("cart").delete().eq("phone_number", phone);
+
+    // If there was a pending Online Payment order, cancel that exact
+    // StyleFlow order — but only if it's still "pending" (guards against
+    // a race with the Razorpay webhook marking it paid at the same time).
+    // No Razorpay API call is made here: no existing Payment Link
+    // cancellation mechanism exists in this codebase, per spec.
+    if (session?.pending_online_order_id) {
+      const { error: cancelOrderError } = await supabase
+        .from("orders")
+        .update({ status: "cancelled" })
+        .eq("id", session.pending_online_order_id)
+        .eq("payment_status", "pending");
+
+      if (cancelOrderError) {
+        console.error("❌ Failed to cancel pending online order on CANCEL:", cancelOrderError.message);
+      }
+    }
+
     await supabase
       .from("user_sessions")
       .update({
@@ -475,7 +493,9 @@ async function clearOrderSession(phone) {
         payment_method: null,
         saved_address_data: null,
         applied_coupon_code: null,
-        applied_discount_amount: null
+        applied_discount_amount: null,
+        pending_online_order_id: null,
+        razorpay_payment_link_url: null
       })
       .eq("phone_number", phone);
     console.log("✅ Order session cleared for:", phone);
@@ -1796,7 +1816,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     // ✅ CANCEL COMMAND
     if (msgLower === "cancel") {
       if (isInActiveOrderFlow(session)) {
-        await clearOrderSession(phone);
+        await clearOrderSession(phone, session);
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
         twiml.message(
           `🚫 *Order process cancelled.*\n\n` +
@@ -2009,17 +2029,54 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
         // Prevent duplicate order/link creation on retry: if this session
         // already has a pending online-payment order with a Payment Link,
-        // reuse it instead of creating a second order + second link.
+        // reuse it — but ONLY if that order is still genuinely pending.
+        // If it has since been paid/confirmed/cancelled (e.g. by the
+        // Razorpay webhook, or a prior CANCEL), its Payment Link must
+        // never be handed out again for a new checkout.
         if (session.pending_online_order_id && session.razorpay_payment_link_url) {
-          await incrementStoreMessageUsage(storeId, "outgoing");
-          await sendWhatsAppMessage(
-            phone,
-            `📱 *Complete Your Online Payment*\n\n` +
-            `🧾 Amount: *₹${orderTotal}*\n\n` +
-            `👉 Pay Now: ${session.razorpay_payment_link_url}\n\n` +
-            `─────────────────\nOr type *CANCEL* to cancel this order.`
-          );
-          return sendTwiml(res, twiml);
+          const { data: existingPendingOrder } = await supabase
+            .from("orders")
+            .select("payment_status")
+            .eq("id", session.pending_online_order_id)
+            .maybeSingle();
+
+          if (existingPendingOrder && existingPendingOrder.payment_status === "pending") {
+            let reuseMsg =
+              `💳 *Complete Your Online Payment*\n\n` +
+              `💰 Total: *₹${orderTotal}*\n\n`;
+
+            if (session.applied_coupon_code) {
+              reuseMsg += `🎟️ Coupon *${session.applied_coupon_code}* applied ✅\n\n`;
+            }
+
+            reuseMsg +=
+              `Tap below to complete your payment:\n\n` +
+              `🔗 Pay Now: ${session.razorpay_payment_link_url}\n\n`;
+
+            if (instructions) reuseMsg += `ℹ️ ${instructions}\n\n`;
+            reuseMsg += `─────────────────\nOr type *CANCEL* to cancel this order.`;
+
+            await incrementStoreMessageUsage(storeId, "outgoing");
+            await sendWhatsAppMessage(phone, reuseMsg);
+            return sendTwiml(res, twiml);
+          }
+
+          // Stale pointers — the old order is no longer pending. Clear them
+          // and fall through below to create a brand new order + new link.
+          const { error: staleClearError } = await supabase
+            .from("user_sessions")
+            .update({
+              pending_online_order_id: null,
+              razorpay_payment_link_url: null
+            })
+            .eq("phone_number", phone);
+
+          if (staleClearError) {
+            console.error("❌ Failed to clear stale online payment session pointers:", staleClearError.message);
+          }
+
+          session.pending_online_order_id = null;
+          session.razorpay_payment_link_url = null;
         }
 
         // ── Step 1: create the pending StyleFlow order BEFORE payment ──
