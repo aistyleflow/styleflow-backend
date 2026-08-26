@@ -52,14 +52,28 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const META_MEDIA_BASE_URL = `https://graph.facebook.com/${META_GRAPH_VERSION}`;
 
 // ─────────────────────────────────────────────────────────
-// RAZORPAY — PHASE 2 CONFIG
-// Order creation only. No verification/webhook logic yet.
+// RAZORPAY — PAUSED (temporary UPI/QR flow active instead)
+// Kept intact for future reactivation. Initialization is now
+// lazy/conditional so the app does not crash if RAZORPAY_KEY_ID /
+// RAZORPAY_KEY_SECRET are removed from the environment while
+// Razorpay is paused. Nothing in the active PAY_UPI flow calls
+// razorpay.* anymore — only getRazorpayClient() would, and it is
+// not invoked from any active code path right now.
 // ─────────────────────────────────────────────────────────
 const Razorpay = require("razorpay");
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET
-});
+let razorpay = null;
+function getRazorpayClient() {
+  if (razorpay) return razorpay;
+  if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
+    console.error("❌ getRazorpayClient: RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET not set — Razorpay is paused");
+    return null;
+  }
+  razorpay = new Razorpay({
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET
+  });
+  return razorpay;
+}
 
 const crypto = require("crypto");
 
@@ -809,6 +823,52 @@ async function createPendingOnlineOrder(phone, session, storeId, orderTotal, sho
     console.error("❌ createPendingOnlineOrder error:", err.message);
     return { success: false, error: err.message };
   }
+}
+
+// ─────────────────────────────────────────────────────────
+// sendOrderPlacedConfirmation — shared by: placeOrder() (COD/old
+// PAID flow), the Razorpay webhook (dormant), and the new manual
+// store payment-verification endpoint. Builds the SAME
+// messages.orderPlaced() summary from an existing orders row +
+// its order_items, and sends it. Does not touch the DB — callers
+// are responsible for the payment_status/status update and for
+// only calling this once per order.
+// ─────────────────────────────────────────────────────────
+async function sendOrderPlacedConfirmation(order, paymentMethodLabel, paymentStatusLabel) {
+  const shopName = await getShopName(order.store_id);
+  const orderNum = order.store_order_number || order.id;
+
+  const { data: orderItems } = await supabase
+    .from("order_items")
+    .select("*")
+    .eq("order_id", order.id);
+
+  let orderSummary = "";
+  for (const item of (orderItems || [])) {
+    const itemTotal = item.price * item.quantity;
+    orderSummary += `• ${item.product_name}${item.size ? ` (${item.size})` : ''} × ${item.quantity} = ₹${itemTotal}\n`;
+  }
+
+  let orderMsg = messages.orderPlaced(
+    shopName,
+    order.customer_name,
+    orderSummary,
+    order.payment_amount,
+    order.customer_address,
+    orderNum,
+    formatDate(order.created_at)
+  );
+
+  if (order.coupon_code && order.discount_amount > 0) {
+    orderMsg += `\n\n🎟️ *Coupon:* ${order.coupon_code} — Saved ₹${order.discount_amount}`;
+  }
+
+  if (paymentMethodLabel && paymentStatusLabel) {
+    orderMsg += `\n\n${paymentMethodLabel}\n${paymentStatusLabel}`;
+  }
+
+  await incrementStoreMessageUsage(order.store_id, "outgoing");
+  await sendWhatsAppMessage(order.phone_number, orderMsg);
 }
 
 app.get("/", (req, res) => {
@@ -1846,6 +1906,108 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
   try {
     const twiml = createReplyQueue(phone);
 
+    // ── STORE OWNER: Payment verification button replies ──
+    // Independent of customer checkout session state — the store owner is
+    // a different phone number acting on a specific order id embedded in
+    // the button id itself, so no session lookup is required to route it.
+    if (msgUpper.startsWith("PAYMENT_RECEIVED_") || msgUpper.startsWith("PAYMENT_NOT_RECEIVED_")) {
+      const isReceived = msgUpper.startsWith("PAYMENT_RECEIVED_");
+      const orderIdStr = isReceived
+        ? msg.replace(/^PAYMENT_RECEIVED_/i, "")
+        : msg.replace(/^PAYMENT_NOT_RECEIVED_/i, "");
+      const verifyOrderId = parseInt(orderIdStr, 10);
+
+      if (!verifyOrderId) {
+        twiml.message(`⚠️ Invalid payment verification request.`);
+        return sendTwiml(res, twiml);
+      }
+
+      const { data: verifyOrder, error: verifyFetchError } = await supabase
+        .from("orders")
+        .select("*")
+        .eq("id", verifyOrderId)
+        .maybeSingle();
+
+      if (verifyFetchError || !verifyOrder) {
+        twiml.message(`⚠️ Order not found.`);
+        return sendTwiml(res, twiml);
+      }
+
+      // Idempotent: a second click (either button) on an already-resolved
+      // order must not re-trigger anything.
+      if (verifyOrder.payment_status !== "payment_claimed") {
+        twiml.message(`ℹ️ Order #${verifyOrder.store_order_number || verifyOrder.id} has already been resolved (status: ${verifyOrder.payment_status}).`);
+        return sendTwiml(res, twiml);
+      }
+
+      if (isReceived) {
+        const { error: paidUpdateError } = await supabase
+          .from("orders")
+          .update({ payment_status: "paid", status: "confirmed" })
+          .eq("id", verifyOrder.id)
+          .eq("payment_status", "payment_claimed");
+
+        if (paidUpdateError) {
+          console.error("❌ Failed to mark order paid:", paidUpdateError.message);
+          twiml.message(`⚠️ Failed to update order. Please try again.`);
+          return sendTwiml(res, twiml);
+        }
+
+        await supabase.from("cart").delete().eq("phone_number", verifyOrder.phone_number);
+        await supabase
+          .from("user_sessions")
+          .update({
+            checkout_step: null,
+            action_step: null,
+            applied_coupon_code: null,
+            applied_discount_amount: null,
+            pending_online_order_id: null,
+            razorpay_payment_link_url: null
+          })
+          .eq("phone_number", verifyOrder.phone_number);
+
+        try {
+          await sendOrderPlacedConfirmation(
+            { ...verifyOrder, payment_status: "paid", status: "confirmed" },
+            "🏪 *Payment Method:* UPI (Direct)",
+            "✅ *Payment Status:* Paid"
+          );
+        } catch (msgErr) {
+          console.error("❌ Failed to send order-placed confirmation (non-fatal):", msgErr.message);
+        }
+
+        twiml.message(`✅ Order #${verifyOrder.store_order_number || verifyOrder.id} marked as paid. Customer has been notified.`);
+        return sendTwiml(res, twiml);
+      } else {
+        const { error: failUpdateError } = await supabase
+          .from("orders")
+          .update({ payment_status: "payment_failed" })
+          .eq("id", verifyOrder.id)
+          .eq("payment_status", "payment_claimed");
+
+        if (failUpdateError) {
+          console.error("❌ Failed to mark payment_failed:", failUpdateError.message);
+          twiml.message(`⚠️ Failed to update order. Please try again.`);
+          return sendTwiml(res, twiml);
+        }
+
+        try {
+          await incrementStoreMessageUsage(verifyOrder.store_id, "outgoing");
+          await sendWhatsAppMessage(
+            verifyOrder.phone_number,
+            `⚠️ *Payment Not Verified*\n\n` +
+            `We couldn't verify your payment for Order #${verifyOrder.store_order_number || verifyOrder.id}.\n\n` +
+            `Please contact the store or try paying again.`
+          );
+        } catch (msgErr) {
+          console.error("❌ Failed to notify customer of payment_failed (non-fatal):", msgErr.message);
+        }
+
+        twiml.message(`❌ Order #${verifyOrder.store_order_number || verifyOrder.id} marked as not received. Customer notified.`);
+        return sendTwiml(res, twiml);
+      }
+    }
+
     const { data: session } = await supabase
       .from("user_sessions")
       .select("*")
@@ -2069,6 +2231,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         }
 
         const upiId = paymentSettings?.upi_id;
+        const qrCodeUrl = paymentSettings?.qr_code_url;
         const instructions = paymentSettings?.payment_instructions;
 
         if (!upiId) {
@@ -2077,13 +2240,10 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
 
-        // Prevent duplicate order/link creation on retry: if this session
-        // already has a pending online-payment order with a Payment Link,
-        // reuse it — but ONLY if that order is still genuinely pending.
-        // If it has since been paid/confirmed/cancelled (e.g. by the
-        // Razorpay webhook, or a prior CANCEL), its Payment Link must
-        // never be handed out again for a new checkout.
-        if (session.pending_online_order_id && session.razorpay_payment_link_url) {
+        // Prevent duplicate order creation on retry: if this session
+        // already has a pending online-payment order for this exact
+        // checkout, reuse it instead of creating a second order.
+        if (session.pending_online_order_id) {
           const { data: existingPendingOrder } = await supabase
             .from("orders")
             .select("payment_status")
@@ -2091,45 +2251,32 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             .maybeSingle();
 
           if (existingPendingOrder && existingPendingOrder.payment_status === "pending") {
-            let reuseMsg =
-              `💳 *Complete Your Online Payment*\n\n` +
-              `💰 Total: *₹${orderTotal}*\n\n`;
-
-            if (session.applied_coupon_code) {
-              reuseMsg += `🎟️ Coupon *${session.applied_coupon_code}* applied ✅\n\n`;
-            }
-
-            reuseMsg +=
-              `Tap below to complete your payment:\n\n` +
-              `🔗 Pay Now: ${session.razorpay_payment_link_url}\n\n`;
-
-            if (instructions) reuseMsg += `ℹ️ ${instructions}\n\n`;
-            reuseMsg += `─────────────────\nOr type *CANCEL* to cancel this order.`;
-
             await incrementStoreMessageUsage(storeId, "outgoing");
-            await sendWhatsAppMessage(phone, reuseMsg);
+            await sendWhatsAppMessage(
+              phone,
+              `💳 *Complete Your Online Payment*\n\n` +
+              `💰 Total: *₹${orderTotal}*\n\n` +
+              `🏪 Pay directly to:\n*${shopName}*\nUPI ID: *${upiId}*\n\n` +
+              `After completing payment, tap the button below.`
+            );
+            await sendWhatsAppButtons(
+              phone,
+              `Once you've paid, confirm here:`,
+              [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
+            );
             return sendTwiml(res, twiml);
           }
 
-          // Stale pointers — the old order is no longer pending. Clear them
-          // and fall through below to create a brand new order + new link.
-          const { error: staleClearError } = await supabase
+          // Stale pointer — the old order is no longer pending. Clear it
+          // and fall through to create a brand new order below.
+          await supabase
             .from("user_sessions")
-            .update({
-              pending_online_order_id: null,
-              razorpay_payment_link_url: null
-            })
+            .update({ pending_online_order_id: null, razorpay_payment_link_url: null })
             .eq("phone_number", phone);
-
-          if (staleClearError) {
-            console.error("❌ Failed to clear stale online payment session pointers:", staleClearError.message);
-          }
-
           session.pending_online_order_id = null;
-          session.razorpay_payment_link_url = null;
         }
 
-        // ── Step 1: create the pending StyleFlow order BEFORE payment ──
+        // ── Create the pending StyleFlow order BEFORE payment ──
         const pendingOrderResult = await createPendingOnlineOrder(phone, session, storeId, orderTotal, shopName);
 
         if (!pendingOrderResult.success) {
@@ -2140,70 +2287,16 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
         const pendingOrder = pendingOrderResult.order;
 
-        // ── Step 2: create a Razorpay Payment Link tied to that order ──
-        let paymentLinkUrl = null;
-        let paymentLinkId = null;
-        try {
-          const paymentLink = await razorpay.paymentLink.create({
-            amount: Math.round(orderTotal * 100),
-            currency: "INR",
-            accept_partial: false,
-            description: `Payment for order #${pendingOrder.store_order_number} at ${shopName}`,
-            customer: {
-              contact: phone
-            },
-            notify: { sms: false, email: false },
-            reference_id: `styleflow_order_${pendingOrder.id}`,
-            notes: {
-              styleflow_order_id: String(pendingOrder.id),
-              phone: phone,
-              store_id: String(storeId)
-            }
-          });
-          paymentLinkUrl = paymentLink?.short_url || null;
-          paymentLinkId = paymentLink?.id || null;
-        } catch (linkErr) {
-          console.error("❌ Razorpay Payment Link creation error:", linkErr.message);
-        }
-
-        if (!paymentLinkUrl) {
-          // Payment Link failed — leave the pending order as-is (status
-          // stays "pending" / payment_status "pending"); do not tell the
-          // customer payment is ready. Clear session pointers so a retry
-          // is possible without ambiguity.
-          console.error("❌ Payment Link creation failed for order:", pendingOrder.id);
-          await incrementStoreMessageUsage(storeId, "outgoing");
-          twiml.message(`⚠️ We couldn't generate the payment link right now. Please try again in a moment, or type *1* for Cash on Delivery.`);
-          return sendTwiml(res, twiml);
-        }
-
-        // ── Step 3: save the Payment Link → order mapping ──
         await supabase
-          .from("orders")
-          .update({
-            razorpay_payment_link_id: paymentLinkId
-          })
-          .eq("id", pendingOrder.id);
-
-        const { error: sessionUpdateError } = await supabase
           .from("user_sessions")
           .update({
             checkout_step: "awaiting_payment",
             payment_method: "UPI",
-            pending_online_order_id: pendingOrder.id,
-            razorpay_payment_link_url: paymentLinkUrl
+            pending_online_order_id: pendingOrder.id
           })
           .eq("phone_number", phone);
 
-        if (sessionUpdateError) {
-          console.error(
-            "❌ Failed to save online payment session:",
-            sessionUpdateError.message
-          );
-          console.error("Session update details:", sessionUpdateError);
-        }
-
-        // ── Step 4: send the payment link to the customer ──
+        // ── Show the store's own UPI ID + QR, then the "I Have Paid" button ──
         let upiMsg =
           `💳 *Complete Your Online Payment*\n\n` +
           `💰 Total: *₹${orderTotal}*\n\n`;
@@ -2212,52 +2305,120 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           upiMsg += `🎟️ Coupon *${session.applied_coupon_code}* applied ✅\n\n`;
         }
 
-        upiMsg +=
-          `Tap below to complete your payment:\n\n` +
-          `🔗 Pay Now: ${paymentLinkUrl}\n\n`;
-
+        upiMsg += `🏪 Pay directly to:\n*${shopName}*\nUPI ID: *${upiId}*\n\n`;
         if (instructions) upiMsg += `ℹ️ ${instructions}\n\n`;
         upiMsg += `─────────────────\nOr type *CANCEL* to cancel this order.`;
 
         await incrementStoreMessageUsage(storeId, "outgoing");
-        await sendWhatsAppMessage(phone, upiMsg);
 
-        return sendTwiml(res, twiml);
-      }
-      if (msgUpper.startsWith("COUPON ") || msgUpper.startsWith("COUPON:")) {
-        const couponCode = msg.replace(/^coupon:?\s*/i, "").trim();
-        if (!couponCode) {
-          await incrementStoreMessageUsage(storeId, "outgoing");
-          twiml.message(`⚠️ Please type your coupon like this:\n*COUPON SAVE20*`);
-          return sendTwiml(res, twiml);
+        if (qrCodeUrl) {
+          try {
+            await sendWhatsAppImage(phone, qrCodeUrl, upiMsg);
+          } catch (imgErr) {
+            console.error("❌ QR image send failed, falling back to text:", imgErr.message);
+            await sendWhatsAppMessage(phone, upiMsg);
+          }
+        } else {
+          await sendWhatsAppMessage(phone, upiMsg);
         }
-        const baseTotal = session.applied_coupon_code && session.applied_discount_amount
-          ? orderTotal + Number(session.applied_discount_amount)
-          : orderTotal;
-        await applyCouponAndRespond(phone, couponCode, storeId, baseTotal, shopName, twiml);
+
+        await sendWhatsAppButtons(
+          phone,
+          `After completing payment, tap the button below to let us know:`,
+          [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
+        );
+
         return sendTwiml(res, twiml);
       }
-
-      const invalidPaymentBody =
-        `⚠️ Invalid selection.\n\n` +
-        buildPaymentOptionsMessage(paymentSettings, orderTotal, shopName, !!session.applied_coupon_code);
-      const invalidPaymentButtons = buildPaymentButtons(paymentSettings, orderTotal);
-
-      await incrementStoreMessageUsage(storeId, "outgoing");
-      if (invalidPaymentButtons) {
-        twiml.buttons(invalidPaymentBody, invalidPaymentButtons);
-      } else {
-        twiml.message(invalidPaymentBody);
-      }
-      return sendTwiml(res, twiml);
     }
-
     // ✅ 5. CHECKOUT STEP — AWAITING UPI PAYMENT
     if (session?.checkout_step === "awaiting_payment") {
       const storeId = session.pending_store_id || sessionStoreId;
       const orderTotal = session.pending_order_total || 0;
 
-      if (msgUpper === "PAID" || msgUpper === "I'VE PAID" || msgUpper === "DONE") {
+      if (msgUpper === "I_HAVE_PAID" || msgUpper === "I HAVE PAID") {
+        // Customer claims payment — this is NOT proof of payment.
+        // payment_status moves to "payment_claimed" only. The order is
+        // NOT confirmed and no success message is sent yet. The store
+        // must manually verify via /verify-payment before anything
+        // becomes "paid".
+        if (!session.pending_online_order_id) {
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.message(`⚠️ We couldn't find a pending payment for you. Please start checkout again.`);
+          return sendTwiml(res, twiml);
+        }
+
+        const { data: claimOrder, error: claimFetchError } = await supabase
+          .from("orders")
+          .select("*")
+          .eq("id", session.pending_online_order_id)
+          .maybeSingle();
+
+        if (claimFetchError || !claimOrder) {
+          console.error("❌ I_HAVE_PAID: order lookup failed:", claimFetchError?.message);
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.message(`⚠️ Something went wrong finding your order. Please contact *${await getShopName(storeId)}*.`);
+          return sendTwiml(res, twiml);
+        }
+
+        // Idempotent: clicking multiple times must not re-notify the store
+        // or change a payment that's already been verified either way.
+        if (claimOrder.payment_status !== "pending") {
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.message(`⏳ We've already received your payment confirmation. The store is verifying it.`);
+          return sendTwiml(res, twiml);
+        }
+
+        const { error: claimUpdateError } = await supabase
+          .from("orders")
+          .update({ payment_status: "payment_claimed" })
+          .eq("id", claimOrder.id)
+          .eq("payment_status", "pending");
+
+        if (claimUpdateError) {
+          console.error("❌ Failed to mark payment_claimed:", claimUpdateError.message);
+          await incrementStoreMessageUsage(storeId, "outgoing");
+          twiml.message(`⚠️ Something went wrong. Please try again.`);
+          return sendTwiml(res, twiml);
+        }
+
+        await incrementStoreMessageUsage(storeId, "outgoing");
+        twiml.message(
+          `⏳ *Payment Verification Pending*\n\n` +
+          `Thanks! We've noted your payment claim for Order #${claimOrder.store_order_number || claimOrder.id}.\n\n` +
+          `The store will verify your payment shortly and confirm your order.`
+        );
+
+        // Notify the store owner with a verification request + buttons.
+        try {
+          const { data: storeOwner } = await supabase
+            .from("shop_owners")
+            .select("phone_number")
+            .eq("id", storeId)
+            .maybeSingle();
+
+          if (storeOwner?.phone_number) {
+            await sendWhatsAppButtons(
+              storeOwner.phone_number,
+              `🔔 *Payment Verification Required*\n\n` +
+              `Order #${claimOrder.store_order_number || claimOrder.id}\n` +
+              `Customer: ${claimOrder.customer_name}\n` +
+              `Total: ₹${claimOrder.payment_amount}\n\n` +
+              `Please check your UPI/bank account and confirm.`,
+              [
+                { id: `PAYMENT_RECEIVED_${claimOrder.id}`, title: "✅ Payment Received" },
+                { id: `PAYMENT_NOT_RECEIVED_${claimOrder.id}`, title: "❌ Not Received" }
+              ]
+            );
+          } else {
+            console.error("❌ No store owner phone_number found for storeId:", storeId);
+          }
+        } catch (notifyErr) {
+          console.error("❌ Failed to notify store owner for payment verification (non-fatal):", notifyErr.message);
+        }
+
+        return sendTwiml(res, twiml);
+      } else if (msgUpper === "PAID" || msgUpper === "I'VE PAID" || msgUpper === "DONE") {
         const shopName = await getShopName(storeId);
         await placeOrder(phone, session, storeId, orderTotal, shopName, "UPI", "awaiting_verification", res, twiml);
         return;
