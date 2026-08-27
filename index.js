@@ -2861,13 +2861,12 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `💰 Price: ₹${chosenProduct.price}\n` +
         `📏 Size: ${requestedSize}\n` +
         `🔢 Quantity: ${quantity}\n` +
-        `📦 Stock: ${chosenProduct.stock}`;
+        `📦 Stock: ${chosenProduct.stock}\n\n` +
+        `🛒 Ready to add *${chosenProduct.product_name}* to your cart?`;
 
-      // Same fix as the voice single-match path: image + product details
-      // sent as ONE message (caption attached to the image) instead of two
-      // separate Meta API calls, removing the race where the lighter button
-      // message could visually render before the slower image message even
-      // though the image was sent first.
+      // Same fix as the voice single-match path: image + product details +
+      // "Ready to add?" sent as ONE message (caption attached to the
+      // image), removing the delivery-order race for the information text.
       let imageSentWithCaption = false;
       if (chosenProduct.image_url) {
         const accessible = await isImageAccessible(chosenProduct.image_url);
@@ -2882,7 +2881,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         await incrementStoreMessageUsage(activeStoreId, "outgoing");
       }
 
-      const buttonsSent = await sendWhatsAppButtons(phone, `🛒 Ready to add *${chosenProduct.product_name}* to your cart?`, [
+      const buttonsSent = await sendWhatsAppButtons(phone, `Tap below to confirm:`, [
         { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
       ]);
       if (buttonsSent) {
