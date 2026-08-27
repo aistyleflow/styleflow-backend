@@ -1360,17 +1360,19 @@ if (productResult.status === "matched") {
     `💰 Price: ₹${product.price}\n` +
     `📏 Size: ${requestedSize}\n` +
     `🔢 Quantity: ${quantity}\n` +
-    `📦 Stock: ${product.stock}`;
+    `📦 Stock: ${product.stock}\n\n` +
+    `🛒 Ready to add *${product.product_name}* to your cart?`;
 
   const addButtons = [{ id: "ADD_PRODUCT", title: "🛒 Add to Cart" }];
 
-  // Image + product details are now sent as ONE message (caption attached
-  // directly to the image) instead of two separate Meta API calls. This
-  // removes the race where Meta could finish processing the lighter
-  // button message before the slower image message, causing the button
-  // to visually appear before the image on the customer's phone even
-  // though the image was sent first. The Add to Cart button is always
-  // sent as the guaranteed follow-up message, after the image+details.
+  // Image + product details + the "Ready to add?" line are all sent as
+  // ONE message (attached to the image caption) instead of splitting the
+  // question into a second Meta API call. This guarantees Details and
+  // "Ready to add?" always render together and in order, since they are
+  // now literally the same message. Only the Add to Cart button itself
+  // remains a separate follow-up call — a button has no ordering-sensitive
+  // text, so it visually reads correctly even if Meta processes it before
+  // the (larger, slower) image message finishes rendering.
   let imageSentWithCaption = false;
   if (product.image_url) {
     const accessible = await isImageAccessible(product.image_url);
@@ -1380,12 +1382,12 @@ if (productResult.status === "matched") {
   }
 
   if (!imageSentWithCaption) {
-    // No image, or image failed — fall back to sending details as plain text
-    // before the button, so details still always precede Add to Cart.
+    // No image, or image failed — fall back to sending details + the
+    // "Ready to add?" line as plain text before the button.
     await sendWhatsAppMessage(phone, caption);
   }
 
-  const buttonsSent = await sendWhatsAppButtons(phone, `🛒 Ready to add *${product.product_name}* to your cart?`, addButtons);
+  const buttonsSent = await sendWhatsAppButtons(phone, `Tap below to confirm:`, addButtons);
   if (!buttonsSent) await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
 
   return;
