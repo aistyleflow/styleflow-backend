@@ -1027,7 +1027,45 @@ async function sendWhatsAppButtons(to, bodyText, buttons, options = {}) {
     }
   };
 
-  console.log("📤 Outgoing Meta interactive-button request → to:", toMetaPhone(to), "ids:", buttons.map(b => b.id).join(","));
+console.log("📤 Outgoing Meta interactive-button request → to:", toMetaPhone(to), "ids:", buttons.map(b => b.id).join(","));
+  const result = await metaGraphRequest(payload);
+  return result.success;
+}
+
+// sendProductInteractiveMessage — sends product image + details + Add to
+// Cart button as ONE Meta interactive message (image header on a button
+// message), instead of two separate Meta API requests. Reuses
+// metaGraphRequest/toMetaPhone — no duplicate config. Meta requires the
+// image header to be a valid, publicly accessible URL; caller must check
+// isImageAccessible() before calling this. Returns true/false.
+async function sendProductInteractiveMessage(to, imageUrl, bodyText, buttons) {
+  if (!Array.isArray(buttons) || buttons.length === 0) {
+    console.error("❌ sendProductInteractiveMessage: no buttons provided");
+    return false;
+  }
+  if (buttons.length > 3) {
+    console.error("❌ sendProductInteractiveMessage: Meta allows max 3 reply buttons, got", buttons.length);
+    return false;
+  }
+
+  const payload = {
+    messaging_product: "whatsapp",
+    to: toMetaPhone(to),
+    type: "interactive",
+    interactive: {
+      type: "button",
+      header: { type: "image", image: { link: imageUrl } },
+      body: { text: bodyText },
+      action: {
+        buttons: buttons.map(b => ({
+          type: "reply",
+          reply: { id: String(b.id), title: String(b.title).slice(0, 20) }
+        }))
+      }
+    }
+  };
+
+  console.log("📤 Outgoing Meta interactive-button+image request → to:", toMetaPhone(to), "ids:", buttons.map(b => b.id).join(","));
   const result = await metaGraphRequest(payload);
   return result.success;
 }
@@ -1102,34 +1140,28 @@ async function sendProductMessage(phone, product, storeId) {
   ];
 
   try {
-    // Meta image messages don't support the interactive button structure,
-    // so image + caption is sent first, then buttons as a separate message.
-    let imageSent = false;
+    // Image header + product details + buttons are now sent as ONE Meta
+    // interactive message via sendProductInteractiveMessage whenever a
+    // valid accessible image exists — no second API request.
+    let sentAsOneMessage = false;
     if (product.image_url && product.image_url.trim() !== '') {
       const accessible = await isImageAccessible(product.image_url);
       if (accessible) {
-        console.log("📷 Sending product with image via Meta Cloud API");
-        imageSent = await sendWhatsAppImageMessage(phone, product.image_url, product.product_name);
-        if (!imageSent) console.log("⚠️ Image send failed — continuing with text/buttons");
+        console.log("📷 Sending product image+details+buttons as one Meta interactive message");
+        sentAsOneMessage = await sendProductInteractiveMessage(phone, product.image_url, bodyText, productButtons);
+        if (!sentAsOneMessage) console.log("⚠️ Combined image+button send failed — falling back to text/buttons");
       } else {
         console.log("⚠️ Image not accessible — sending text only");
       }
     }
 
-    if (imageSent) {
+    if (sentAsOneMessage) {
       if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-      const buttonsSent = await sendWhatsAppButtons(phone, bodyText, productButtons);
-      if (buttonsSent) {
-        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-      } else {
-        console.log("⚠️ Interactive buttons failed after image — falling back to text instructions");
-        await sendWhatsAppMessage(phone, `Type *ADD* to 🛒 Add to Cart\nType *CART* to 👀 View Cart\nType *CHECKOUT* to ✅ Checkout`);
-        if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
-      }
       return;
     }
 
-    // No image (or image failed) — try interactive buttons with the body text.
+    // No image, image inaccessible, or combined send failed — fall back
+    // to interactive buttons with the body text (no image).
     const buttonsSent = await sendWhatsAppButtons(phone, bodyText, productButtons);
     if (buttonsSent) {
       if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
@@ -1365,30 +1397,23 @@ if (productResult.status === "matched") {
 
   const addButtons = [{ id: "ADD_PRODUCT", title: "🛒 Add to Cart" }];
 
-  // Image + product details + the "Ready to add?" line are all sent as
-  // ONE message (attached to the image caption) instead of splitting the
-  // question into a second Meta API call. This guarantees Details and
-  // "Ready to add?" always render together and in order, since they are
-  // now literally the same message. Only the Add to Cart button itself
-  // remains a separate follow-up call — a button has no ordering-sensitive
-  // text, so it visually reads correctly even if Meta processes it before
-  // the (larger, slower) image message finishes rendering.
-  let imageSentWithCaption = false;
+  // Image header + product details + Add to Cart button are now sent as
+  // ONE Meta interactive message via sendProductInteractiveMessage — no
+  // second API request, so there is no delivery-order race at all.
+  let sentAsOneMessage = false;
   if (product.image_url) {
     const accessible = await isImageAccessible(product.image_url);
     if (accessible) {
-      imageSentWithCaption = await sendWhatsAppImageMessage(phone, product.image_url, caption);
+      sentAsOneMessage = await sendProductInteractiveMessage(phone, product.image_url, caption, addButtons);
     }
   }
 
-  if (!imageSentWithCaption) {
-    // No image, or image failed — fall back to sending details + the
-    // "Ready to add?" line as plain text before the button.
-    await sendWhatsAppMessage(phone, caption);
+  if (!sentAsOneMessage) {
+    // No image, image inaccessible, or the combined send failed —
+    // fall back to the existing two-message text+buttons behavior.
+    const buttonsSent = await sendWhatsAppButtons(phone, caption, addButtons);
+    if (!buttonsSent) await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
   }
-
-  const buttonsSent = await sendWhatsAppButtons(phone, `Tap below to confirm:`, addButtons);
-  if (!buttonsSent) await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
 
   return;
 }
@@ -2864,31 +2889,27 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         `📦 Stock: ${chosenProduct.stock}\n\n` +
         `🛒 Ready to add *${chosenProduct.product_name}* to your cart?`;
 
-      // Same fix as the voice single-match path: image + product details +
-      // "Ready to add?" sent as ONE message (caption attached to the
-      // image), removing the delivery-order race for the information text.
-      let imageSentWithCaption = false;
+      const addButtons = [{ id: "ADD_PRODUCT", title: "🛒 Add to Cart" }];
+
+      // Same fix as the voice single-match path: image header + details +
+      // Add to Cart button sent as ONE Meta interactive message.
+      let sentAsOneMessage = false;
       if (chosenProduct.image_url) {
         const accessible = await isImageAccessible(chosenProduct.image_url);
         if (accessible) {
-          imageSentWithCaption = await sendWhatsAppImageMessage(phone, chosenProduct.image_url, caption);
-          if (imageSentWithCaption) await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          sentAsOneMessage = await sendProductInteractiveMessage(phone, chosenProduct.image_url, caption, addButtons);
+          if (sentAsOneMessage) await incrementStoreMessageUsage(activeStoreId, "outgoing");
         }
       }
 
-      if (!imageSentWithCaption) {
-        await sendWhatsAppMessage(phone, caption);
-        await incrementStoreMessageUsage(activeStoreId, "outgoing");
-      }
-
-      const buttonsSent = await sendWhatsAppButtons(phone, `Tap below to confirm:`, [
-        { id: "ADD_PRODUCT", title: "🛒 Add to Cart" }
-      ]);
-      if (buttonsSent) {
-        await incrementStoreMessageUsage(activeStoreId, "outgoing");
-      } else {
-        await sendWhatsAppMessage(phone, `Reply *ADD* to add this product to your cart.`);
-        await incrementStoreMessageUsage(activeStoreId, "outgoing");
+      if (!sentAsOneMessage) {
+        const buttonsSent = await sendWhatsAppButtons(phone, caption, addButtons);
+        if (buttonsSent) {
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        } else {
+          await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
+          await incrementStoreMessageUsage(activeStoreId, "outgoing");
+        }
       }
       return;
     }
