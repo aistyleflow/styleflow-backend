@@ -2382,6 +2382,18 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
 
+        // Clear the active checkout/payment session so the customer's next
+        // message (e.g. ORDER STATUS) is handled normally instead of
+        // re-entering this awaiting_payment block. store_id and the
+        // payment_claimed order itself are left untouched.
+        await supabase
+          .from("user_sessions")
+          .update({
+            checkout_step: null,
+            pending_online_order_id: null
+          })
+          .eq("phone_number", phone);
+
         await incrementStoreMessageUsage(storeId, "outgoing");
         twiml.message(
           `⏳ *Payment Verification Pending*\n\n` +
@@ -2419,9 +2431,31 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
         return sendTwiml(res, twiml);
       } else if (msgUpper === "PAID" || msgUpper === "I'VE PAID" || msgUpper === "DONE") {
-        const shopName = await getShopName(storeId);
-        await placeOrder(phone, session, storeId, orderTotal, shopName, "UPI", "awaiting_verification", res, twiml);
-        return;
+        // Old text-based confirmation. Must NOT create another order.
+        // If a payment_claimed order already exists for this pending
+        // order, tell the customer verification is already pending.
+        // Otherwise, direct them to use the I Have Paid button instead
+        // of silently calling placeOrder() again.
+        if (session.pending_online_order_id) {
+          const { data: existingClaim } = await supabase
+            .from("orders")
+            .select("*")
+            .eq("id", session.pending_online_order_id)
+            .maybeSingle();
+
+          if (existingClaim && existingClaim.payment_status === "payment_claimed") {
+            await incrementStoreMessageUsage(storeId, "outgoing");
+            twiml.message(
+              `⏳ We've already received your payment confirmation for Order #${existingClaim.store_order_number || existingClaim.id}.\n\n` +
+              `The store is verifying it.`
+            );
+            return sendTwiml(res, twiml);
+          }
+        }
+
+        await incrementStoreMessageUsage(storeId, "outgoing");
+        twiml.message(`Please tap the *✅ I Have Paid* button above to confirm your payment.`);
+        return sendTwiml(res, twiml);
       } else {
         const paymentSettings = await getPaymentSettings(storeId);
         const upiId = paymentSettings?.upi_id || 'N/A';
@@ -3959,6 +3993,107 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
     return sendTwiml(res, twiml);
   }
 }
+
+// Dashboard payment verification. Matches the existing /update-status
+// pattern: no session/token auth, storeId is trusted from the request
+// body and cross-checked against order.store_id.
+app.post("/verify-payment", async (req, res) => {
+  try {
+    const { orderId, storeId, action } = req.body;
+
+    if (!orderId || !storeId || !action) {
+      return res.status(400).json({ error: "orderId, storeId and action required" });
+    }
+
+    if (!["received", "not_received"].includes(action)) {
+      return res.status(400).json({ error: `Invalid action: ${action}` });
+    }
+
+    const { data: order, error: fetchError } = await supabase
+      .from("orders")
+      .select("*")
+      .eq("id", orderId)
+      .maybeSingle();
+
+    if (fetchError || !order) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    if (String(order.store_id) !== String(storeId)) {
+      return res.status(403).json({ error: "This order does not belong to your store" });
+    }
+
+    if (order.payment_status !== "payment_claimed") {
+      return res.status(200).json({ success: true, skipped: true, reason: `already_${order.payment_status}` });
+    }
+
+    if (action === "received") {
+      const { error: paidUpdateError } = await supabase
+        .from("orders")
+        .update({ payment_status: "paid", status: "confirmed" })
+        .eq("id", order.id)
+        .eq("payment_status", "payment_claimed");
+
+      if (paidUpdateError) {
+        console.error("❌ /verify-payment: failed to mark paid:", paidUpdateError.message);
+        return res.status(500).json({ error: paidUpdateError.message });
+      }
+
+      await supabase.from("cart").delete().eq("phone_number", order.phone_number);
+      await supabase
+        .from("user_sessions")
+        .update({
+          checkout_step: null,
+          action_step: null,
+          applied_coupon_code: null,
+          applied_discount_amount: null,
+          pending_online_order_id: null,
+          razorpay_payment_link_url: null
+        })
+        .eq("phone_number", order.phone_number);
+
+      try {
+        await sendOrderPlacedConfirmation(
+          { ...order, payment_status: "paid", status: "confirmed" },
+          "🏪 *Payment Method:* UPI (Direct)",
+          "✅ *Payment Status:* Paid"
+        );
+      } catch (msgErr) {
+        console.error("❌ /verify-payment: confirmation send failed (non-fatal):", msgErr.message);
+      }
+
+      return res.status(200).json({ success: true, status: "paid" });
+    } else {
+      const { error: failUpdateError } = await supabase
+        .from("orders")
+        .update({ payment_status: "payment_failed" })
+        .eq("id", order.id)
+        .eq("payment_status", "payment_claimed");
+
+      if (failUpdateError) {
+        console.error("❌ /verify-payment: failed to mark not received:", failUpdateError.message);
+        return res.status(500).json({ error: failUpdateError.message });
+      }
+
+      try {
+        await incrementStoreMessageUsage(order.store_id, "outgoing");
+        await sendWhatsAppMessage(
+          order.phone_number,
+          `⚠️ *Payment Not Verified*\n\n` +
+          `We couldn't verify your payment for Order #${order.store_order_number || order.id}.\n\n` +
+          `Please contact the store or try paying again.`
+        );
+      } catch (msgErr) {
+        console.error("❌ /verify-payment: customer notify failed (non-fatal):", msgErr.message);
+      }
+
+      return res.status(200).json({ success: true, status: "payment_failed" });
+    }
+  } catch (err) {
+    console.error("❌ /verify-payment unexpected error:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 app.post("/update-status", async (req, res) => {
   try {
