@@ -1337,7 +1337,7 @@ if (productResult.status === "multiple_matches") {
 
 if (productResult.status === "matched") {
   const product = productResult.product;
-  const requestedSize = productResult.size || "Free Size";
+  const requestedSize = productResult.size || product.size || "Free Size";
   const quantity = productResult.quantity || 1;
 
   // ✅ Connect voice match → existing session/product-selection mechanism.
@@ -2877,7 +2877,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         console.error("❌ Failed to save selected voice product state:", collapseError.message);
       }
 
-      const requestedSize = voiceMultiState.size || "Free Size";
+      const requestedSize = voiceMultiState.size || chosenProduct.size || "Free Size";
       const quantity = voiceMultiState.quantity || 1;
 
       const caption =
