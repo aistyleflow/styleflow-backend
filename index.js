@@ -2279,18 +2279,34 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
           if (existingPendingOrder && existingPendingOrder.payment_status === "pending") {
             await incrementStoreMessageUsage(storeId, "outgoing");
-            await sendWhatsAppMessage(
-              phone,
+            const retryUpiId = paymentSettings?.upi_id || upiId;
+            const retryQrCodeUrl = paymentSettings?.qr_code_url;
+            const retryBody =
               `💳 *Complete Your Online Payment*\n\n` +
               `💰 Total: *₹${orderTotal}*\n\n` +
-              `🏪 Pay directly to:\n*${shopName}*\nUPI ID: *${upiId}*\n\n` +
-              `After completing payment, tap the button below.`
-            );
-            await sendWhatsAppButtons(
-              phone,
-              `Once you've paid, confirm here:`,
-              [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
-            );
+              `🏪 Pay directly to:\n*${shopName}*\nUPI ID: *${retryUpiId}*\n\n` +
+              `─────────────────\nOr type *CANCEL* to cancel this order.`;
+
+            let retrySentAsOneMessage = false;
+            if (retryQrCodeUrl) {
+              const accessible = await isImageAccessible(retryQrCodeUrl);
+              if (accessible) {
+                retrySentAsOneMessage = await sendProductInteractiveMessage(
+                  phone,
+                  retryQrCodeUrl,
+                  retryBody,
+                  [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
+                );
+              }
+            }
+
+            if (!retrySentAsOneMessage) {
+              await sendWhatsAppButtons(
+                phone,
+                retryBody,
+                [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
+              );
+            }
             return sendTwiml(res, twiml);
           }
 
@@ -2338,22 +2354,30 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
 
         await incrementStoreMessageUsage(storeId, "outgoing");
 
+        let upiSentAsOneMessage = false;
         if (qrCodeUrl) {
           try {
-            await sendWhatsAppImage(phone, qrCodeUrl, upiMsg);
+            const accessible = await isImageAccessible(qrCodeUrl);
+            if (accessible) {
+              upiSentAsOneMessage = await sendProductInteractiveMessage(
+                phone,
+                qrCodeUrl,
+                upiMsg,
+                [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
+              );
+            }
           } catch (imgErr) {
-            console.error("❌ QR image send failed, falling back to text:", imgErr.message);
-            await sendWhatsAppMessage(phone, upiMsg);
+            console.error("❌ QR image send failed, falling back to text+button:", imgErr.message);
           }
-        } else {
-          await sendWhatsAppMessage(phone, upiMsg);
         }
 
-        await sendWhatsAppButtons(
-          phone,
-          `After completing payment, tap the button below to let us know:`,
-          [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
-        );
+        if (!upiSentAsOneMessage) {
+          await sendWhatsAppButtons(
+            phone,
+            upiMsg,
+            [{ id: "I_HAVE_PAID", title: "✅ I Have Paid" }]
+          );
+        }
 
         return sendTwiml(res, twiml);
       }
