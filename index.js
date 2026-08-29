@@ -425,23 +425,36 @@ async function getPaymentSettings(storeId) {
 }
 
 async function getSavedAddress(phone, storeId) {
+  console.log("📍 ADDRESS LOOKUP");
+  console.log("PHONE:", phone);
+  console.log("STORE ID:", storeId);
+
   if (!phone || !storeId) return null;
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("customer_addresses")
     .select("*")
     .eq("phone_number", phone)
     .eq("store_id", storeId)
     .maybeSingle();
+
+  console.log("📍 ADDRESS LOOKUP ERROR:", error);
+  console.log("📍 ADDRESS LOOKUP DATA:", data);
+
   return data;
 }
 
 async function saveCustomerAddress(phone, storeId, customerName, address, pincode) {
+  console.log("💾 SAVING CUSTOMER ADDRESS");
+  console.log("PHONE:", phone);
+  console.log("STORE ID:", storeId);
+  console.log("ADDRESS:", address);
+
   try {
     const existing = await getSavedAddress(phone, storeId);
     const resolvedPincode = pincode || (address.match(/\d{6}/) || [])[0] || null;
 
     if (existing) {
-      await supabase
+      const { data: updateData, error: updateError } = await supabase
         .from("customer_addresses")
         .update({
           customer_name: customerName,
@@ -450,9 +463,13 @@ async function saveCustomerAddress(phone, storeId, customerName, address, pincod
           updated_at: new Date().toISOString()
         })
         .eq("phone_number", phone)
-        .eq("store_id", storeId);
+        .eq("store_id", storeId)
+        .select();
+
+      console.log("💾 SAVE (update) ERROR:", updateError);
+      console.log("💾 SAVE (update) DATA:", updateData);
     } else {
-      await supabase
+      const { data: insertData, error: insertError } = await supabase
         .from("customer_addresses")
         .insert({
           phone_number: phone,
@@ -462,7 +479,11 @@ async function saveCustomerAddress(phone, storeId, customerName, address, pincod
           pincode: resolvedPincode,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString()
-        });
+        })
+        .select();
+
+      console.log("💾 SAVE (insert) ERROR:", insertError);
+      console.log("💾 SAVE (insert) DATA:", insertData);
     }
   } catch (err) {
     console.error("❌ saveCustomerAddress error:", err.message);
@@ -2570,6 +2591,8 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       if (msg === "1" || msg === "2") {
         if (!session.customer_address && !session.pending_order_total) {
           const recoveryStoreId = sessionStoreId || session.pending_store_id;
+          console.log("🏪 ADDRESS CHECKOUT STORE ID:", recoveryStoreId);
+          console.log("📞 ADDRESS CHECKOUT PHONE:", phone);
           const savedAddress = await getSavedAddress(phone, recoveryStoreId);
 
           if (savedAddress) {
@@ -3504,6 +3527,8 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         if (firstProduct?.store_id) storeId = firstProduct.store_id;
       }
 
+      console.log("🏪 ADDRESS CHECKOUT STORE ID:", storeId);
+      console.log("📞 ADDRESS CHECKOUT PHONE:", phone);
       const savedAddress = await getSavedAddress(phone, storeId);
 
       if (savedAddress) {
