@@ -4004,8 +4004,12 @@ async function placeOrder(phone, session, storeId, orderTotal, shopName, payment
       })
       .eq("phone_number", phone);
 
+    console.log("🔎 PRE-SAVE GUARD CHECK — storeId:", storeId, "| customer_name:", session.customer_name, "| customer_address:", session.customer_address);
     if (storeId && session.customer_name && session.customer_address) {
+      console.log("✅ GUARD PASSED — calling saveCustomerAddress with address:", session.customer_address);
       await saveCustomerAddress(phone, storeId, session.customer_name, session.customer_address, pincodeFromAddress);
+    } else {
+      console.log("❌ GUARD FAILED — saveCustomerAddress was NOT called");
     }
 
     let orderMsg = messages.orderPlaced(
