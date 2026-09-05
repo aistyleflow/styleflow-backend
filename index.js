@@ -903,12 +903,19 @@ app.get("/", (req, res) => {
 async function isImageAccessible(url) {
   try {
     if (!url || url.trim() === '') return false;
-    const response = await fetch(url, { method: "HEAD" });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000); // was: no timeout — could hang indefinitely
+    let response;
+    try {
+      response = await fetch(url, { method: "HEAD", signal: controller.signal });
+    } finally {
+      clearTimeout(timeoutId);
+    }
     console.log(`🔎 Image check: ${url} → ${response.status} ${response.ok ? '✅' : '❌'}`);
     return response.ok;
   } catch (err) {
     console.error("❌ Image accessibility check failed:", err.message);
-    return false;
+    return false; // same fallback behavior as before — falls back to text/buttons without image
   }
 }
 
@@ -939,14 +946,22 @@ function toMetaPhone(phone) {
 
 async function metaGraphRequest(payload) {
   try {
-    const response = await fetch(META_GRAPH_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${META_ACCESS_TOKEN}`
-      },
-      body: JSON.stringify(payload)
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000); // was: no timeout
+    let response;
+    try {
+      response = await fetch(META_GRAPH_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${META_ACCESS_TOKEN}`
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const data = await response.json().catch(() => ({}));
 
@@ -1137,6 +1152,7 @@ async function sendWhatsAppList(to, bodyText, buttonText, sections, options = {}
 }
 
 async function sendProductMessage(phone, product, storeId) {
+  const __ts = Date.now();
   console.log("📤 sendProductMessage — product:", product.product_name, "image:", product.image_url || "none");
 
   const bodyText =
@@ -1177,10 +1193,10 @@ async function sendProductMessage(phone, product, storeId) {
     }
 
     if (sentAsOneMessage) {
-      if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+      console.log("⏱️ WHATSAPP SEND:", Date.now() - __ts, "ms");
+      if (storeId) incrementStoreMessageUsage(storeId, "outgoing");
       return;
     }
-
     // No image, image inaccessible, or combined send failed — fall back
     // to interactive buttons with the body text (no image).
     const buttonsSent = await sendWhatsAppButtons(phone, bodyText, productButtons);
@@ -1598,28 +1614,14 @@ async function sendVoiceOrderConfirmation(phone, matchedProduct, quantity) {
 
 async function saveSession(phone, data) {
   try {
-    const { data: existing } = await supabase
+    await supabase
       .from("user_sessions")
-      .select("phone_number")
-      .eq("phone_number", phone)
-      .maybeSingle();
-
-    if (existing) {
-      await supabase
-        .from("user_sessions")
-        .update({ last_results: data })
-        .eq("phone_number", phone);
-    } else {
-      await supabase
-        .from("user_sessions")
-        .insert({ phone_number: phone, last_results: data });
-    }
+      .upsert({ phone_number: phone, last_results: data }, { onConflict: "phone_number" });
     return true;
   } catch (err) {
     return false;
   }
 }
-
 async function saveSelectedProduct(phone, productId) {
   try {
     const { data: existing } = await supabase
@@ -1941,13 +1943,8 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ─────────────────────────────────────────────────────────
-// CORE BUSINESS LOGIC — identical behavior to the original
-// Twilio app.post("/whatsapp") handler. Only the transport
-// (how phone/msg arrive, and how replies are sent) changed.
-// twiml.message(...) now queues a Meta text reply, flushed by sendTwiml().
-// ─────────────────────────────────────────────────────────
 async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
+  const __t0 = Date.now();
   const fakeRes = { headersSent: false, status() { return this; }, end() {}, json() {} };
   const res = fakeRes;
 
@@ -2061,6 +2058,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       .select("*")
       .eq("phone_number", phone)
       .maybeSingle();
+    console.log("⏱️ SESSION LOOKUP:", Date.now() - __t0, "ms");
 
     console.log("📋 checkout_step:", session?.checkout_step || "none");
     console.log("📋 action_step:", session?.action_step || "none");
@@ -2070,7 +2068,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     const activeStoreId = sessionStoreId || session?.pending_store_id || null;
 
     if (activeStoreId) {
-      await incrementStoreMessageUsage(activeStoreId, "incoming");
+      incrementStoreMessageUsage(activeStoreId, "incoming"); // fire-and-forget — logging must not delay the customer's response
     }
 
     // ✅ CANCEL COMMAND
@@ -3819,6 +3817,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       .order("id", { ascending: false });
 
     const { data, error } = await searchQuery;
+    console.log("⏱️ PRODUCT LOOKUP:", Date.now() - __t0, "ms");
 
     if (data && data.length > 0) {
       await saveSession(phone, data);
@@ -3853,6 +3852,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       twiml.message(`Sorry, no product found for "${msg}". 😔\n\nTry: *Black*, *Jeans*, *XL*`);
     }
 
+    console.log("⏱️ TOTAL:", Date.now() - __t0, "ms");
     return sendTwiml(res, twiml);
 
   } catch (error) {
