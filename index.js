@@ -1155,20 +1155,6 @@ async function sendProductMessage(phone, product, storeId) {
   const __ts = Date.now();
   console.log("📤 sendProductMessage — product:", product.product_name, "image:", product.image_url || "none");
 
-  // 📊 Analytics: log this individual product view. Fire-and-forget —
-  // never blocks or delays the customer-facing message, and any
-  // failure is logged only, never surfaced to the customer.
-  console.log("📊 PRODUCT VIEW TRACKING REACHED — storeId:", storeId, "product.id:", product.id, "phone:", phone);
-  if (storeId) {
-    supabase.from("product_views").insert({
-      store_id: storeId,
-      product_id: product.id,
-      phone_number: phone
-    }).then(({ error }) => {
-      if (error) console.error("❌ product_views insert error:", error.message);
-    });
-  }
-
   const bodyText =
     `🛍️ *Product Details*\n\n` +
     `📦 Product: ${product.product_name}\n` +
@@ -1209,6 +1195,16 @@ async function sendProductMessage(phone, product, storeId) {
     if (sentAsOneMessage) {
       console.log("⏱️ WHATSAPP SEND:", Date.now() - __ts, "ms");
       if (storeId) incrementStoreMessageUsage(storeId, "outgoing");
+      // 📊 Analytics: individual product card confirmed sent. Fire-and-forget.
+      if (storeId) {
+        supabase.from("product_views").insert({
+          store_id: storeId,
+          product_id: product.id,
+          phone_number: phone
+        }).then(({ error }) => {
+          if (error) console.error("❌ product_views insert error:", error.message);
+        });
+      }
       return;
     }
     // No image, image inaccessible, or combined send failed — fall back
@@ -1216,6 +1212,16 @@ async function sendProductMessage(phone, product, storeId) {
     const buttonsSent = await sendWhatsAppButtons(phone, bodyText, productButtons);
     if (buttonsSent) {
       if (storeId) await incrementStoreMessageUsage(storeId, "outgoing");
+      // 📊 Analytics: individual product card confirmed sent (buttons-only fallback).
+      if (storeId) {
+        supabase.from("product_views").insert({
+          store_id: storeId,
+          product_id: product.id,
+          phone_number: phone
+        }).then(({ error }) => {
+          if (error) console.error("❌ product_views insert error:", error.message);
+        });
+      }
       return;
     }
 
@@ -1459,11 +1465,28 @@ if (productResult.status === "matched") {
     }
   }
 
+  let productCardSent = sentAsOneMessage;
   if (!sentAsOneMessage) {
     // No image, image inaccessible, or the combined send failed —
     // fall back to the existing two-message text+buttons behavior.
     const buttonsSent = await sendWhatsAppButtons(phone, caption, addButtons);
-    if (!buttonsSent) await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
+    if (buttonsSent) {
+      productCardSent = true;
+    } else {
+      await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
+      productCardSent = true;
+    }
+  }
+
+  // 📊 Analytics: individual product card confirmed sent (voice single-match flow).
+  if (productCardSent && storeId) {
+    supabase.from("product_views").insert({
+      store_id: product.store_id || storeId,
+      product_id: product.id,
+      phone_number: phone
+    }).then(({ error }) => {
+      if (error) console.error("❌ product_views insert error:", error.message);
+    });
   }
 
   return;
@@ -2961,14 +2984,28 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         }
       }
 
+      let chosenProductCardSent = sentAsOneMessage;
       if (!sentAsOneMessage) {
         const buttonsSent = await sendWhatsAppButtons(phone, caption, addButtons);
         if (buttonsSent) {
           await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          chosenProductCardSent = true;
         } else {
           await sendWhatsAppMessage(phone, caption + `\n\nReply *ADD* to add this product to your cart.`);
           await incrementStoreMessageUsage(activeStoreId, "outgoing");
+          chosenProductCardSent = true;
         }
+      }
+
+      // 📊 Analytics: individual product card confirmed sent (voice multi-match, chosen product).
+      if (chosenProductCardSent && activeStoreId) {
+        supabase.from("product_views").insert({
+          store_id: chosenProduct.store_id || activeStoreId,
+          product_id: chosenProduct.id,
+          phone_number: phone
+        }).then(({ error }) => {
+          if (error) console.error("❌ product_views insert error:", error.message);
+        });
       }
       return;
     }
