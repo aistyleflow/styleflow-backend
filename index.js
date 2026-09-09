@@ -1158,6 +1158,7 @@ async function sendProductMessage(phone, product, storeId) {
   // 📊 Analytics: log this individual product view. Fire-and-forget —
   // never blocks or delays the customer-facing message, and any
   // failure is logged only, never surfaced to the customer.
+  console.log("📊 PRODUCT VIEW TRACKING REACHED — storeId:", storeId, "product.id:", product.id, "phone:", phone);
   if (storeId) {
     supabase.from("product_views").insert({
       store_id: storeId,
@@ -3316,6 +3317,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
       // 📊 Analytics: successful add-to-cart (no-size flow). Only reached
       // if the cart write above succeeded; failures here are logged only
       // and never block the cart operation.
+      console.log("📊 CART EVENT TRACKING REACHED — activeStoreId:", activeStoreId, "productIdToUse:", productIdToUse, "phone:", phone);
       supabase.from("cart_events").insert({
         store_id: activeStoreId,
         product_id: productIdToUse,
@@ -3676,6 +3678,7 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         // 📊 Analytics: successful add-to-cart (size-selected flow). Only
         // reached if the cart write above succeeded; failures here are
         // logged only and never block the cart operation.
+        console.log("📊 CART EVENT TRACKING REACHED — product.store_id:", product.store_id, "activeStoreId:", activeStoreId, "selected_product_id:", session.selected_product_id, "phone:", phone);
         supabase.from("cart_events").insert({
           store_id: product.store_id || activeStoreId,
           product_id: session.selected_product_id,
