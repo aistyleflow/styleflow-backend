@@ -1155,6 +1155,19 @@ async function sendProductMessage(phone, product, storeId) {
   const __ts = Date.now();
   console.log("📤 sendProductMessage — product:", product.product_name, "image:", product.image_url || "none");
 
+  // 📊 Analytics: log this individual product view. Fire-and-forget —
+  // never blocks or delays the customer-facing message, and any
+  // failure is logged only, never surfaced to the customer.
+  if (storeId) {
+    supabase.from("product_views").insert({
+      store_id: storeId,
+      product_id: product.id,
+      phone_number: phone
+    }).then(({ error }) => {
+      if (error) console.error("❌ product_views insert error:", error.message);
+    });
+  }
+
   const bodyText =
     `🛍️ *Product Details*\n\n` +
     `📦 Product: ${product.product_name}\n` +
@@ -3224,6 +3237,17 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             }
           }
 
+          // 📊 Analytics: successful add-to-cart (voice flow). Only reached
+          // if the cart write above succeeded; failures here are logged
+          // only and never block the cart operation.
+          supabase.from("cart_events").insert({
+            store_id: activeStoreId,
+            product_id: productIdToUse,
+            phone_number: phone
+          }).then(({ error }) => {
+            if (error) console.error("❌ cart_events insert error:", error.message);
+          });
+
           // ✅ Clear voice pending from session (it was consumed here).
           // Also clear any stale checkout_step="size" left over from an
           // earlier interaction, so the next CHECKOUT reaches its handler
@@ -3288,6 +3312,17 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
           return sendTwiml(res, twiml);
         }
       }
+
+      // 📊 Analytics: successful add-to-cart (no-size flow). Only reached
+      // if the cart write above succeeded; failures here are logged only
+      // and never block the cart operation.
+      supabase.from("cart_events").insert({
+        store_id: activeStoreId,
+        product_id: productIdToUse,
+        phone_number: phone
+      }).then(({ error }) => {
+        if (error) console.error("❌ cart_events insert error:", error.message);
+      });
 
       // ✅ Clear voice pending from session if it was used. Also clear any
       // stale checkout_step="size" left from an earlier interaction so a
@@ -3525,6 +3560,18 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
         if (firstProduct?.store_id) storeId = firstProduct.store_id;
       }
 
+      // 📊 Analytics: checkout actually started (top-level CHECKOUT entry
+      // point only, reached here after the empty-cart guard already
+      // passed). Fire-and-forget — never blocks the checkout flow.
+      if (storeId) {
+        supabase.from("checkout_events").insert({
+          store_id: storeId,
+          phone_number: phone
+        }).then(({ error }) => {
+          if (error) console.error("❌ checkout_events insert error:", error.message);
+        });
+      }
+
       console.log("🏪 ADDRESS CHECKOUT STORE ID:", storeId);
       console.log("📞 ADDRESS CHECKOUT PHONE:", phone);
       const savedAddress = await getSavedAddress(phone, storeId);
@@ -3625,6 +3672,17 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
             size: 'Free Size'
           });
         }
+
+        // 📊 Analytics: successful add-to-cart (size-selected flow). Only
+        // reached if the cart write above succeeded; failures here are
+        // logged only and never block the cart operation.
+        supabase.from("cart_events").insert({
+          store_id: product.store_id || activeStoreId,
+          product_id: session.selected_product_id,
+          phone_number: phone
+        }).then(({ error }) => {
+          if (error) console.error("❌ cart_events insert error:", error.message);
+        });
 
         await supabase.from("user_sessions").update({ action_step: "product_action" }).eq("phone_number", phone);
         const actionStepAddedBody =
