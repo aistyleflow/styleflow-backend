@@ -2104,6 +2104,27 @@ async function processIncomingMessage(phone, msg, msgLower, msgUpper) {
     const sessionStoreId = session?.store_id || null;
     const activeStoreId = sessionStoreId || session?.pending_store_id || null;
 
+    // ── SUBSCRIPTION GATE — expired stores must not be processed ──
+    // Added per subscription-enforcement requirement. Runs immediately
+    // after store identification and before any message-processing
+    // logic (cancel command, store-code detection, cart/checkout, AI,
+    // order creation, etc.). trial/active stores are completely
+    // unaffected — this block only returns early when expired.
+    if (activeStoreId) {
+      const { data: subCheckStore, error: subCheckError } = await supabase
+        .from("shop_owners")
+        .select("subscription_status")
+        .eq("id", activeStoreId)
+        .maybeSingle();
+
+      if (subCheckError) {
+        console.error("❌ Subscription check failed (non-fatal, proceeding):", subCheckError.message);
+      } else if (subCheckStore?.subscription_status === "expired") {
+        console.log("⛔ Store subscription expired — skipping message processing for store:", activeStoreId);
+        return;
+      }
+    }
+
     if (activeStoreId) {
       incrementStoreMessageUsage(activeStoreId, "incoming"); // fire-and-forget — logging must not delay the customer's response
     }
