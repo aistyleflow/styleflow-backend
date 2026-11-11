@@ -9,7 +9,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "@supabase/supabase-js": "^2.45.4",
-    "express": "^4.19.2",
+    "express": "^4.22.3",
     "razorpay": "^2.9.8"
   },
   "engines": {
